@@ -2730,11 +2730,12 @@ function IncomeEventTimeline({
         <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
           <div>
             <h4 className="font-black text-slate-950">
-              나이별 세후 월소득과 생활비 차이
+              나이별 월 가구 현금흐름과 생활비 차이
             </h4>
             <p className="mt-1 text-xs text-slate-500">
-              파란선은 근로·연금소득, 주황 점선은 생활비 기준, 붉은 영역은 해당
-              연도의 부족분입니다.
+              파란선은 각 연도의 근로·연금·임대·기타소득 합계에서 그해 매월 내는
+              대출 원리금을 뺀 금액입니다. 주황 점선은 생활비 기준, 붉은 영역은
+              해당 연도의 부족분입니다.
             </p>
           </div>
           <Badge variant="outline">단위: 월 원</Badge>
@@ -2774,7 +2775,7 @@ function IncomeEventTimeline({
                 formatter={(value, name) => [
                   money(Number(value)),
                   name === 'actual'
-                    ? '부채상환 후 가구 현금소득'
+                    ? '가구소득 - 그해 월 대출상환액'
                     : name === 'essential'
                       ? livingCostLegend
                       : '생활비 기준 부족액',
@@ -2783,7 +2784,7 @@ function IncomeEventTimeline({
               <Legend
                 formatter={(value) =>
                   value === 'actual'
-                    ? '부채상환 후 가구 현금소득'
+                    ? '가구소득 - 그해 월 대출상환액'
                     : value === 'essential'
                       ? livingCostLegend
                       : '생활비 기준 부족액'
@@ -2893,7 +2894,7 @@ function IncomeEventTimeline({
       </div>
       <div className="mt-3 grid gap-3 md:grid-cols-3">
         <Metric
-          label={`${visibleSelectedYear}년 예상 가구 현금소득`}
+          label={`${visibleSelectedYear}년 월 가구소득(대출 원리금 차감)`}
           value={money(
             selectedCashflow?.householdCashIncomeAfterDebt ??
               selectedSnapshot.householdIncome,
@@ -3095,8 +3096,8 @@ function IncomeEventTimeline({
                 </div>
                 <p className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
                   {group.year}년 생활비{' '}
-                  {money(cashflow?.livingCost ?? snapshot.livingCost)} 대비
-                  부채상환 후 예상 현금소득{' '}
+                  {money(cashflow?.livingCost ?? snapshot.livingCost)} 대비 그해
+                  월 대출상환액을 차감한 예상 가구소득{' '}
                   {money(
                     cashflow?.householdCashIncomeAfterDebt ??
                       snapshot.householdIncome,
@@ -4101,7 +4102,7 @@ function LivingCostIncomeReport({
               )
             </h3>
             <p className="mt-2 text-sm leading-6 text-slate-700">
-              부채상환 후 가구 현금소득{' '}
+              {householdRetirementYear}년 월 대출상환액을 차감한 가구소득{' '}
               <b>
                 {money(householdRetirementRow.householdCashIncomeAfterDebt)}
               </b>{' '}
