@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\NpsSimulator.Application\NpsSimulator.Application.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\data\policies\packs\kr-nps\2026.08.1\policy-pack.json" Link="policy-pack.json" />
+  </ItemGroup>
+</Project>

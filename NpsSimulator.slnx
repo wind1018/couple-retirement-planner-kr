@@ -1,0 +1,13 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/NpsSimulator.Domain/NpsSimulator.Domain.csproj" />
+    <Project Path="src/NpsSimulator.Policy/NpsSimulator.Policy.csproj" />
+    <Project Path="src/NpsSimulator.Simulation/NpsSimulator.Simulation.csproj" />
+    <Project Path="src/NpsSimulator.Storage/NpsSimulator.Storage.csproj" />
+    <Project Path="src/NpsSimulator.Application/NpsSimulator.Application.csproj" />
+    <Project Path="src/NpsSimulator.Desktop/NpsSimulator.Desktop.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/NpsSimulator.Tests/NpsSimulator.Tests.csproj" />
+  </Folder>
+</Solution>
