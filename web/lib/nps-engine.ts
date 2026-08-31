@@ -99,6 +99,23 @@ export type Policy = {
   survivorAdditionalRate: number;
   normalClaimAges: { from: number; to?: number; age: number }[];
   survivorRates: { from: number; to?: number; rate: number }[];
+  basicPension: {
+    baseYear: number;
+    standardMonthly: number;
+    coupleEachMonthly: number;
+  };
+  livingCostBenchmarks: {
+    general: {
+      baseYear: number;
+      minimum: number[];
+      median: number[];
+    };
+    retiredCouple: {
+      baseYear: number;
+      minimum: number;
+      median: number;
+    };
+  };
   npsGuides: NpsPolicyGuide[];
   privatePension: PrivatePensionPolicy;
   notes: string[];
@@ -158,6 +175,27 @@ export type AnnualRow = {
   detailB?: string;
 };
 
+export type TaxEstimateStatus =
+  | 'complete'
+  | 'partial'
+  | 'unknown'
+  | 'not_applicable';
+
+export type SurvivorYearResult = {
+  year: number;
+  survivor: 'a' | 'b';
+  survivorName: string;
+  ownNationalPension: number;
+  survivorPensionFull: number;
+  survivorPensionAdditional: number;
+  selectedNationalPension: number;
+  additionalPrivatePension: number;
+  basicPension: number;
+  totalNetPension: number;
+  decision: 'own_plus_30pct_survivor' | 'full_survivor';
+  decisionText: string;
+};
+
 export type SimulationResult = {
   a: PersonResult;
   b: PersonResult | null;
@@ -165,6 +203,8 @@ export type SimulationResult = {
   afterFirstDeathMonthly: number | null;
   survivorDecision: string | null;
   survivorCalculation: string | null;
+  survivorRows: SurvivorYearResult[];
+  afterFirstDeath: SurvivorYearResult | null;
   totalAdditionalContribution: number;
   bothAliveNationalMonthly: number;
   bothAliveAdditionalMonthly: number;
@@ -172,6 +212,7 @@ export type SimulationResult = {
   additionalPensions: AdditionalPensionSummary[];
   rows: AnnualRow[];
   warnings: string[];
+  overallTaxEstimateStatus: TaxEstimateStatus;
 };
 
 export type AdditionalPensionSummary = AdditionalPensionInput & {
@@ -184,6 +225,8 @@ export type AdditionalPensionSummary = AdditionalPensionInput & {
   firstYearEstimatedNetMonthly: number;
   firstYearAnnualPensionLimit: number | null;
   limitExceeded: boolean;
+  taxEstimateStatus: TaxEstimateStatus;
+  missingTaxInputs: string[];
 };
 
 export const DEFAULT_POLICY: Policy = {
@@ -207,6 +250,29 @@ export const DEFAULT_POLICY: Policy = {
     { from: 120, to: 240, rate: 0.5 },
     { from: 240, rate: 0.6 },
   ],
+  basicPension: {
+    baseYear: 2026,
+    standardMonthly: 349_700,
+    coupleEachMonthly: 279_760,
+  },
+  livingCostBenchmarks: {
+    general: {
+      baseYear: 2026,
+      minimum: [
+        820_556, 1_343_773, 1_714_892, 2_078_316, 2_418_150, 2_737_905,
+        3_044_848,
+      ],
+      median: [
+        2_564_238, 4_199_292, 5_359_036, 6_494_738, 7_556_719, 8_555_952,
+        9_515_150,
+      ],
+    },
+    retiredCouple: {
+      baseYear: 2024,
+      minimum: 2_166_000,
+      median: 2_981_000,
+    },
+  },
   npsGuides: [
     {
       id: 'normal',
@@ -863,6 +929,9 @@ function additionalPensionSummary(
             projectedContribution,
         );
   const firstYearAnnualPensionLimit = pensionLimit(account, 1, policy);
+  const retirementTaxMissing =
+    isRetirementIncomeKind(account.kind) && account.deferredRetirementTax <= 0;
+  const annuityTaxUnknown = account.kind === 'annuityInsurance';
   return {
     ...account,
     ownerName: owner.name,
@@ -876,6 +945,16 @@ function additionalPensionSummary(
     limitExceeded:
       firstYearAnnualPensionLimit != null &&
       payment.gross * 12 > firstYearAnnualPensionLimit,
+    taxEstimateStatus: retirementTaxMissing
+      ? 'unknown'
+      : annuityTaxUnknown
+        ? 'partial'
+        : 'complete',
+    missingTaxInputs: retirementTaxMissing
+      ? ['퇴직소득세 예상액']
+      : annuityTaxUnknown
+        ? ['연금보험 과세 여부 또는 보험차익']
+        : [],
   };
 }
 
@@ -933,16 +1012,14 @@ export function simulate(
     b?.claimYear ?? a.claimYear,
     ...(additionalStartYears.length ? additionalStartYears : [a.claimYear]),
   );
-  const end = Math.max(
-    a.birthDate.getFullYear() + 95,
-    b ? b.birthDate.getFullYear() + 95 : 0,
-  );
+  const end = Math.max(a.deathYear, b?.deathYear ?? a.deathYear);
   const firstDeathYear = b ? Math.min(a.deathYear, b.deathYear) : Infinity;
   const aDiesFirst = !!b && a.deathYear < b.deathYear;
   const bDiesFirst = !!b && b.deathYear < a.deathYear;
   let survivorDecision: string | null = null;
   let survivorCalculation: string | null = null;
   let afterFirstDeathMonthly: number | null = null;
+  const survivorRows: SurvivorYearResult[] = [];
   const rows: AnnualRow[] = [];
 
   for (let year = earliest; year <= end; year++) {
@@ -965,6 +1042,10 @@ export function simulate(
     let detailA = '';
     let detailB = '';
     let status = b ? '부부 생존' : '본인 수령';
+    let survivorContext: Omit<
+      SurvivorYearResult,
+      'additionalPrivatePension' | 'basicPension' | 'totalNetPension'
+    > | null = null;
 
     if (b && year > firstDeathYear && (aliveA || aliveB)) {
       const survivor = aDiesFirst ? b : a;
@@ -989,11 +1070,21 @@ export function simulate(
       const selected = Math.max(ownPlus, raw);
       const addition = Math.max(0, selected - own);
       status = `${deceased.name} 사망 후 · ${survivor.name} 수령`;
-      survivorDecision =
+      const decisionText =
         ownPlus >= raw
           ? `${survivor.name} 노령연금 + 유족연금 ${policy.survivorAdditionalRate * 100}%가 유리 (${selected.toLocaleString('ko-KR')}원)`
           : `노령연금을 포기하고 유족연금 전액이 유리 (${selected.toLocaleString('ko-KR')}원)`;
-      survivorCalculation = `사망자 정상연금 역산 기본연금액 × 가입기간 지급률 ${(survivorRate(deceased.creditedMonths, policy) * 100).toFixed(0)}%; 전액 선택은 사망자 노령연금 100%가 아니라 산정된 유족연금의 100%입니다.`;
+      survivorContext = {
+        year,
+        survivor: aDiesFirst ? 'b' : 'a',
+        survivorName: survivor.name,
+        ownNationalPension: own,
+        survivorPensionFull: raw,
+        survivorPensionAdditional: addition,
+        selectedNationalPension: selected,
+        decision: ownPlus >= raw ? 'own_plus_30pct_survivor' : 'full_survivor',
+        decisionText,
+      };
       if (aDiesFirst) {
         pensionA = 0;
         pensionB = selected;
@@ -1042,8 +1133,23 @@ export function simulate(
     const nationalPensionB = pensionB;
     const grossA = pensionA + additionalA.gross;
     const grossB = pensionB + additionalB.gross;
-    if (b && year > firstDeathYear && (aliveA || aliveB))
-      afterFirstDeathMonthly ??= grossA + grossB;
+    if (survivorContext) {
+      const additionalPrivatePension =
+        survivorContext.survivor === 'a' ? additionalA.net : additionalB.net;
+      const survivorYearResult: SurvivorYearResult = {
+        ...survivorContext,
+        additionalPrivatePension,
+        basicPension: 0,
+        totalNetPension:
+          survivorContext.selectedNationalPension + additionalPrivatePension,
+      };
+      survivorRows.push(survivorYearResult);
+      if (year === firstDeathYear + 1) {
+        survivorDecision = survivorYearResult.decisionText;
+        survivorCalculation = `사망자 정상연금 역산 기본연금액 × 가입기간 지급률 ${(survivorRate((aDiesFirst ? a : b)?.creditedMonths ?? 0, policy) * 100).toFixed(0)}%; 전액 선택은 사망자 노령연금 100%가 아니라 산정된 유족연금의 100%입니다.`;
+        afterFirstDeathMonthly = survivorYearResult.totalNetPension;
+      }
+    }
     if (grossA + grossB > 0)
       rows.push({
         year,
@@ -1091,6 +1197,8 @@ export function simulate(
     afterFirstDeathMonthly,
     survivorDecision,
     survivorCalculation,
+    survivorRows,
+    afterFirstDeath: survivorRows[0] ?? null,
     totalAdditionalContribution:
       a.additionalContribution + (b?.additionalContribution ?? 0),
     bothAliveNationalMonthly,
@@ -1100,6 +1208,15 @@ export function simulate(
       bothAliveNationalMonthly + bothAliveAdditionalMonthly,
     additionalPensions,
     rows,
+    overallTaxEstimateStatus: additionalPensions.some(
+      (account) => account.taxEstimateStatus === 'unknown',
+    )
+      ? 'unknown'
+      : additionalPensions.some(
+            (account) => account.taxEstimateStatus === 'partial',
+          )
+        ? 'partial'
+        : 'complete',
     warnings: [
       ...policy.notes,
       ...(npsInflation.enabled
@@ -1140,6 +1257,20 @@ export function validatePolicy(value: unknown): Policy {
     return {
       ...(p as Policy),
       npsGuides: p.npsGuides ?? DEFAULT_POLICY.npsGuides,
+      basicPension: {
+        ...DEFAULT_POLICY.basicPension,
+        ...p.basicPension,
+      },
+      livingCostBenchmarks: {
+        general: {
+          ...DEFAULT_POLICY.livingCostBenchmarks.general,
+          ...p.livingCostBenchmarks?.general,
+        },
+        retiredCouple: {
+          ...DEFAULT_POLICY.livingCostBenchmarks.retiredCouple,
+          ...p.livingCostBenchmarks?.retiredCouple,
+        },
+      },
       privatePension: {
         ...DEFAULT_POLICY.privatePension,
         ...p.privatePension,
@@ -1222,6 +1353,8 @@ export function validatePolicy(value: unknown): Policy {
           : { to: x.contributionMonthsToExclusive }),
         rate: ratio(x.rate),
       })),
+      basicPension: DEFAULT_POLICY.basicPension,
+      livingCostBenchmarks: DEFAULT_POLICY.livingCostBenchmarks,
       npsGuides: DEFAULT_POLICY.npsGuides,
       privatePension: DEFAULT_POLICY.privatePension,
       notes: desktop.notes ?? [],

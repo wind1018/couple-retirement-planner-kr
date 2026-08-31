@@ -4,20 +4,18 @@ import type {
   SimulationResult,
 } from './nps-engine.ts';
 import {
-  analyzeHouseholdRetirement,
-  type HouseholdRetirementAnalysis,
-} from './pension-goal.ts';
-import {
   addBasicPensionToResult,
   type BasicPensionSettings,
   type LivingCostSettings,
   livingCostLabel,
   livingCostMonthly,
 } from './public-pension.ts';
+import { buildIncomeTimelineEvents } from './income-timeline.ts';
 import {
-  buildIncomeTimelineEvents,
-  incomeTimelineSnapshot,
-} from './income-timeline.ts';
+  buildHouseholdCashflow,
+  type HouseholdCashflowAnalysis,
+  type HouseholdFinanceSettings,
+} from './household-cashflow.ts';
 
 export type AiAnalysisMarkdownInput = {
   result: SimulationResult;
@@ -26,6 +24,8 @@ export type AiAnalysisMarkdownInput = {
   basicPension: BasicPensionSettings;
   livingCost: LivingCostSettings;
   plannerNetReturnRate: number;
+  householdFinance: HouseholdFinanceSettings;
+  includeLateLifeGap: boolean;
   generatedAt?: Date;
 };
 
@@ -83,24 +83,20 @@ function personLines(
   ];
 }
 
-function householdRetirementLines(
-  analysis: HouseholdRetirementAnalysis | null,
-) {
-  if (!analysis) {
-    return ['근로·사업소득 참여자가 없어 가구 은퇴 시점을 별도로 계산하지 않음'];
-  }
+function fundingLines(analysis: HouseholdCashflowAnalysis) {
   return [
-    `- 가구 은퇴: ${analysis.retirementYear}년 (${agePair(analysis.ageA, analysis.ageB)})`,
-    `- 은퇴 첫해 생활비 기준: ${money(analysis.essentialMonthlyAtRetirement)}/월`,
-    `- 은퇴 첫해 개시된 예상 세후 연금소득: ${money(analysis.expectedMonthlyAtRetirement)}/월`,
-    `- 은퇴 첫해 부족 추정: ${analysis.monthlyGapAtRetirement > 0 ? `-${money(analysis.monthlyGapAtRetirement)}/월` : '부족 없음'}`,
-    `- 부족 발생 추정 기간: ${analysis.firstGapYear == null ? '없음' : `${analysis.firstGapYear}~${analysis.lastGapYear}년`}`,
-    `- 기간 중 최대 월 부족 추정: ${money(analysis.maximumMonthlyGap)}`,
-    `- 보수적 필요재원 현재가치 추정: ${money(analysis.requiredCapital)}`,
-    `- 현재부터 필요재원 준비 시 월 적립 추정: ${money(analysis.monthlyContribution)} (${analysis.savingYears.toFixed(1)}년 준비 가정)`,
-    analysis.suggestedEarlyAccount
-      ? `- 조기 개시 비교 후보: ${analysis.suggestedEarlyAccount.ownerName}의 ${analysis.suggestedEarlyAccount.name} (현재 ${analysis.suggestedEarlyAccount.currentStartYear}년·${analysis.suggestedEarlyAccount.currentStartAge}세 개시 설정)`
-      : '- 조기 개시 비교 후보: 등록된 후보 없음',
+    `- 첫 부족연도: ${analysis.firstGapYear ?? '없음'}`,
+    `- 최대 월 부족액: ${money(analysis.maximumMonthlyGap)}`,
+    `- 실제 연도별 부족액 현재가치: ${money(analysis.exactGapPresentValue)}`,
+    `  - 기준연도: ${analysis.baseYear}년`,
+    `  - 세후 할인율: 연 ${analysis.discountRate}%`,
+    '  - 계산법: 연도별 실제 월 부족액 × 12를 기준연도로 할인한 합계',
+    `- 최대 부족액 지속 가정 스트레스 필요재원: ${money(analysis.conservativeStressCapital)}`,
+    `  - 기준연도: ${analysis.baseYear}년`,
+    `  - 세후 할인율: 연 ${analysis.discountRate}%`,
+    '- 스트레스 값은 기본 필요재원이 아니라 보수적 상한 비교값',
+    `- 은퇴 활용 가능 자산 차감 후 추가 필요재원: ${money(analysis.fundingNeedAfterAvailableAssets)}`,
+    `- 첫 부족 전 월 적립 추정: ${money(analysis.suggestedMonthlyContribution)}`,
   ];
 }
 
@@ -111,31 +107,33 @@ export function buildAiAnalysisMarkdown({
   basicPension,
   livingCost,
   plannerNetReturnRate,
+  householdFinance,
+  includeLateLifeGap,
   generatedAt = new Date(),
 }: AiAnalysisMarkdownInput) {
-  const result = addBasicPensionToResult(sourceResult, basicPension);
+  const result = addBasicPensionToResult(sourceResult, basicPension, policy);
   const currentYear = generatedAt.getFullYear();
   const generatedDate = generatedAt.toISOString().slice(0, 10);
   const livingLabel = livingCostLabel(livingCost);
-  const householdRetirement = analyzeHouseholdRetirement(
-    [],
+  const cashflow = buildHouseholdCashflow({
     result,
-    plannerNetReturnRate,
-    (year) => livingCostMonthly(livingCost, year),
+    livingCost,
+    finance: householdFinance,
+    annualNetReturnRate: plannerNetReturnRate,
+    includeLateLifeGap,
     currentYear,
-  );
-  const finalYear = result.rows.at(-1)?.year ?? currentYear;
-  const eventGroups = buildIncomeTimelineEvents(result, currentYear).filter(
-    (group) => group.year >= currentYear && group.year <= finalYear,
-  );
-  const timelineRows = eventGroups.map((group) => {
-    const snapshot = incomeTimelineSnapshot(
-      result,
-      group.year,
-      livingCostMonthly(livingCost, group.year),
-    );
-    return `| ${group.year} | ${cell(agePair(snapshot.ageA, snapshot.ageB))} | ${cell(group.events.map((event) => event.title).join(', '))} | ${money(snapshot.employmentA + snapshot.employmentB)} | ${money(snapshot.pensionNetA + snapshot.pensionNetB)} | ${money(snapshot.householdIncome)} | ${money(snapshot.livingCost)} | ${signedMoney(snapshot.surplus, snapshot.gap)} |`;
+    policy,
   });
+  const eventByYear = new Map(
+    buildIncomeTimelineEvents(result, currentYear).map((group) => [
+      group.year,
+      group.events.map((event) => event.title).join(', '),
+    ]),
+  );
+  const timelineRows = cashflow.rows.map(
+    (row) =>
+      `| ${row.year} | ${cell(agePair(row.ageA, row.ageB))} | ${cell(eventByYear.get(row.year) ?? '')} | ${money(row.employmentIncome)} | ${money(row.nationalPension)} | ${money(row.basicPension)} | ${money(row.privatePension)} | ${money(row.rentalIncomeNet)} | ${money(row.otherIncome)} | ${money(row.debtService)} | ${money(row.livingCost)} | ${signedMoney(row.monthlySurplus, row.monthlyGap)} |`,
+  );
   const additionalRows = result.additionalPensions.map((account) => {
     const contributionFrequency =
       contributionFrequencyLabels[account.contributionFrequency ?? 'none'] ??
@@ -146,14 +144,54 @@ export function buildAiAnalysisMarkdown({
       (account.contributionAmount ?? 0) <= 0
         ? '없음'
         : `${contributionFrequency} ${money(account.contributionAmount ?? 0)}, ${account.contributionEndAge ?? account.startAge}세까지`;
-    return `| ${cell(account.ownerName)} | ${cell(pensionKindLabels[account.kind])} | ${cell(account.name)} | ${money(account.expectedBalance)} | ${cell(contribution)} | ${account.startYear}년 (${account.startAge}세) | ${account.payoutYears}년 | ${account.annualReturnRateBeforeStart ?? 0}% / ${account.annualReturnRate}% | ${account.annualFeeRate}% | ${account.projectedStartBalance == null ? '직접 월액 입력' : money(account.projectedStartBalance)} | ${money(account.firstYearEstimatedNetMonthly)} |`;
+    return `| ${cell(account.ownerName)} | ${cell(pensionKindLabels[account.kind])} | ${cell(account.name)} | ${money(account.expectedBalance)} | ${cell(contribution)} | ${account.startYear}년 (${account.startAge}세) | ${account.payoutYears}년 | ${account.annualReturnRateBeforeStart ?? 0}% / ${account.annualReturnRate}% | ${account.annualFeeRate}% | ${account.projectedStartBalance == null ? '직접 월액 입력' : money(account.projectedStartBalance)} | ${money(account.firstYearEstimatedNetMonthly)} | ${account.taxEstimateStatus} |`;
   });
-  const warnings = result.warnings.length
-    ? result.warnings.map((warning) => `- ${warning}`)
-    : ['- 시뮬레이터가 생성한 별도 경고 없음'];
+  const assetRows = householdFinance.assets.map(
+    (asset) =>
+      `| ${cell(asset.name)} | ${asset.type} | ${money(asset.currentValue)} | ${asset.retirementLiquidity} | ${asset.salePlan?.enabled ? `${asset.salePlan.year}년` : '없음'} | ${asset.rental?.enabled ? money(asset.rental.grossMonthlyRent) : '없음'} |`,
+  );
+  const debtRows = householdFinance.debts.map(
+    (debt) =>
+      `| ${cell(debt.name)} | ${money(debt.principal)} | ${debt.repaymentType ?? '미입력'} | ${debt.annualInterestRate == null ? '미입력' : `${debt.annualInterestRate}%`} | ${debt.manualMonthlyPayment == null ? '자동/미입력' : money(debt.manualMonthlyPayment)} | ${debt.maturityYear ?? '미입력'} |`,
+  );
+  const gapRows = cashflow.gapPeriods.map(
+    (period, index) =>
+      `| ${index + 1} | ${period.startYear} | ${period.endYear} | ${period.phase} | ${money(period.maxMonthlyGap)} | ${money(period.exactPresentValue)} |`,
+  );
+  const completeness = [
+    '- [x] 본인 근로소득·은퇴 시점',
+    `- [${result.b ? 'x' : ' '}] 배우자 근로소득·은퇴 시점`,
+    '- [x] 국민연금',
+    `- [${result.additionalPensions.length ? 'x' : ' '}] 개인·퇴직연금`,
+    '- [x] 생활비',
+    `- [${householdFinance.assets.length ? 'x' : ' '}] 자산`,
+    `- [${householdFinance.debts.length ? 'x' : ' '}] 대출잔액`,
+    `- [${cashflow.finance.completeness.debtService === 'complete' ? 'x' : ' '}] 대출 금리 또는 월 상환액`,
+    `- [${cashflow.finance.monthlyRentalIncomeGrossAtBaseYear > 0 ? 'x' : ' '}] 임대료`,
+    `- [${cashflow.finance.completeness.rentalNetIncome === 'complete' ? 'x' : ' '}] 임대소득 세금·공실·운영비`,
+    `- [${householdFinance.assets.some((asset) => asset.type === 'cash' || asset.type === 'financial') ? 'x' : ' '}] 현금·예금·금융자산`,
+    `- [${(livingCost.survivorMode ?? 'same_as_couple') !== 'same_as_couple' ? 'x' : ' '}] 첫 사망 후 생활비`,
+  ];
+  const warnings = [
+    ...cashflow.warnings.map(
+      (warning) =>
+        `- [${warning.severity.toUpperCase()}] ${warning.code}: ${warning.message}`,
+    ),
+    ...result.warnings.map((warning) => `- [INFO] ${warning}`),
+  ];
 
   return [
-    '# AI 상담용 부부 연금·은퇴 현황',
+    '---',
+    'document_type: retirement_simulation_ai_handoff',
+    'schema_version: "2.0"',
+    `generated_at: "${generatedAt.toISOString()}"`,
+    `policy_id: "${policy.policyId}"`,
+    `base_year: ${currentYear}`,
+    'currency: KRW',
+    'calculation_resolution: annual',
+    '---',
+    '',
+    '# AI 상담용 부부 연금·은퇴 종합현황',
     '',
     `- 생성일: ${generatedDate}`,
     `- 계산 정책: ${policy.policyId} (시행 기준 ${policy.effectiveDate})`,
@@ -162,6 +200,10 @@ export function buildAiAnalysisMarkdown({
     '> **개인정보 주의:** 이 파일은 암호화되지 않은 평문입니다. 생년월일 전체와 암호는 포함하지 않았지만 연금액·소득·자산 추정치가 들어 있습니다. 공유 전 내용을 직접 확인하세요.',
     '',
     '> **계산 주의:** 모든 금액은 입력값과 정책 가정에 따른 추정치입니다. 실제 수급 자격, 세금, 수수료, 투자손익, 물가와 제도 변경은 금융기관·국민연금공단·세무 전문가에게 별도로 확인해야 합니다.',
+    '',
+    '## 0. 계산 완성도',
+    '',
+    ...completeness,
     '',
     '## AI에게 요청할 분석',
     '',
@@ -173,53 +215,116 @@ export function buildAiAnalysisMarkdown({
     '4. 물가상승률, 기대수익률, 예상 사망 나이가 달라질 때 취약한 가정을 찾아 민감도 점검 항목을 제안해 주세요.',
     '5. 결론을 단정하기 전에 누락되었거나 확인이 필요한 정보와 계산 가정을 질문 목록으로 만들어 주세요.',
     '',
-    '## 1. 가구 구성과 은퇴 전 소득',
+    '## 1. 가구 구성과 근로소득',
     '',
     ...personLines('본인', result.a, currentYear),
     ...personLines('배우자', result.b, currentYear),
-    '## 2. 공통 계산 가정',
+    '## 2. 국민연금·공통 계산 가정',
     '',
     `- 생활비 비교 기준: ${livingLabel}`,
-    `- 기준연도 생활비: ${money(livingCostMonthly(livingCost, currentYear))}/월`,
+    `- 기준연도 생활비: ${money(livingCostMonthly(livingCost, currentYear, false, policy))}/월`,
     `- 생활비 물가상승률: 연 ${livingCost.annualInflationRate}%`,
     `- 국민연금 물가연동 적용: ${yesNo(npsInflation.enabled)}${npsInflation.enabled ? ` (연 ${npsInflation.annualRate}%)` : ''}`,
     `- 기초연금 가정: 본인 ${yesNo(basicPension.a)}, 배우자 ${yesNo(Boolean(result.b && basicPension.b))}`,
     `- 부족재원 현재가치·적립 계산의 세후 기대수익률: 연 ${plannerNetReturnRate}%`,
+    '- 사망 시점 계산 convention: 예상 사망 나이가 되는 연도 말까지 생존한 것으로 보고 유족연금과 생존자 생활비 전환은 다음 연도부터 적용',
+    `- 첫 사망 후 생활비 방식: ${livingCost.survivorMode ?? 'same_as_couple'}${livingCost.survivorMode === 'ratio' ? ` (${livingCost.survivorRatio ?? 75}%)` : ''}`,
+    `- 필요재원 포함 범위: ${includeLateLifeGap ? '마지막 생존자 사망까지' : '첫 사망 이전 기본계획 + 첫 사망 이후 별도 위험'}`,
     '',
     '## 3. 연금 합산 요약',
     '',
     `- 두 사람 생존 시 전체 연금 월 합산: ${money(result.bothAliveMonthly)}`,
     `- 국민연금 월 합산: ${money(result.bothAliveNationalMonthly)}`,
     `- 개인·퇴직연금 월 합산: ${money(result.bothAliveAdditionalMonthly)}`,
-    `- 예상 세후 연금 월 합산: ${money(result.estimatedBothAliveNetMonthly)}`,
-    `- 첫 사망 후 월 합산: ${result.afterFirstDeathMonthly == null ? '해당 없음' : money(result.afterFirstDeathMonthly)}`,
-    `- 첫 사망 후 국민연금 판단: ${result.survivorDecision ?? '해당 없음'}`,
+    `- 연금 세금 추정 상태: ${result.overallTaxEstimateStatus}`,
+    `- 세후 또는 부분 세후 추정 연금 월 합산: ${money(result.estimatedBothAliveNetMonthly)}`,
     '',
-    '## 4. 개인·퇴직연금 상세',
+    '## 4. 자산·부채·개인·퇴직연금',
     '',
     ...(additionalRows.length
       ? [
-          '| 대상 | 종류 | 표시 이름 | 현재 적립금 | 추가납입 | 수령 개시 | 수령기간 | 개시 전/수령 중 수익률 | 연 수수료 | 개시 예상 적립금 | 첫해 예상 세후 월액 |',
-          '|---|---|---|---:|---|---|---:|---:|---:|---:|---:|',
+          '### 개인·퇴직연금',
+          '',
+          '| 대상 | 종류 | 표시 이름 | 현재 적립금 | 추가납입 | 수령 개시 | 수령기간 | 개시 전/수령 중 수익률 | 연 수수료 | 개시 예상 적립금 | 첫해 예상 월액 | 세금 상태 |',
+          '|---|---|---|---:|---|---|---:|---:|---:|---:|---:|---|',
           ...additionalRows,
         ]
       : ['등록된 개인·퇴직연금 없음']),
     '',
-    '## 5. 가구 은퇴와 생활비 부족 분석',
+    '### 자산',
     '',
-    ...householdRetirementLines(householdRetirement),
+    ...(assetRows.length
+      ? [
+          '| 이름 | 유형 | 현재가치 | 은퇴 유동성 | 매각계획 | 월 임대료 |',
+          '|---|---|---:|---|---|---:|',
+          ...assetRows,
+        ]
+      : ['등록된 자산 없음']),
     '',
-    '## 6. 주요 연도별 소득·생활비 변화',
+    '### 부채',
     '',
-    '| 연도 | 당시 나이 | 주요 사건 | 근로소득/월 | 세후 연금소득/월 | 세후 가구소득/월 | 생활비 기준/월 | 차이/월 |',
-    '|---:|---|---|---:|---:|---:|---:|---:|',
+    ...(debtRows.length
+      ? [
+          '| 이름 | 잔액 | 상환방식 | 금리 | 월 상환액 | 만기 |',
+          '|---|---:|---|---:|---:|---|',
+          ...debtRows,
+        ]
+      : ['등록된 부채 없음']),
+    '',
+    `- 총자산: ${money(cashflow.finance.grossAssets)}`,
+    `- 총부채: ${money(cashflow.finance.liabilities)}`,
+    `- 순자산: ${money(cashflow.finance.netWorth)}`,
+    `- 은퇴 활용 가능 자산: ${money(cashflow.finance.retirementAvailableAssets)}`,
+    `- 실거주 주택 가치: ${money(cashflow.finance.primaryHomeValue)} (매각 계획이 없으면 은퇴재원에서 제외)`,
+    '',
+    '## 5. 기타 반복소득',
+    '',
+    `- 기준연도 임대 세전 월소득: ${money(cashflow.finance.monthlyRentalIncomeGrossAtBaseYear)}`,
+    `- 기준연도 임대 순 월소득: ${money(cashflow.finance.monthlyRentalIncomeNetAtBaseYear)}`,
+    `- 기준연도 기타 반복소득: ${money(cashflow.finance.monthlyOtherIncomeAtBaseYear)}`,
+    `- 기준연도 월 부채상환: ${money(cashflow.finance.monthlyDebtServiceAtBaseYear)}`,
+    '',
+    '## 6. 연도별 가구 현금흐름',
+    '',
+    '| 연도 | 당시 나이 | 주요 사건 | 근로 | 국민연금 | 기초연금 | 사적연금 | 임대순소득 | 기타 | 대출상환 | 생활비 | 순차이 |',
+    '|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|',
     ...timelineRows,
     '',
-    '## 7. 시뮬레이터 경고와 확인사항',
+    '## 7. 부족구간',
+    '',
+    ...(gapRows.length
+      ? [
+          '| 구간 | 시작 | 종료 | 단계 | 최대 월 부족 | 기준연도 현재가치 |',
+          '|---:|---:|---:|---|---:|---:|',
+          ...gapRows,
+        ]
+      : ['부족구간 없음']),
+    '',
+    '## 8. 필요재원',
+    '',
+    ...fundingLines(cashflow),
+    '',
+    '## 9. 첫 사망 후 전환',
+    '',
+    ...(result.afterFirstDeath
+      ? [
+          `- 전환연도: ${result.afterFirstDeath.year}년`,
+          `- 생존자: ${result.afterFirstDeath.survivorName}`,
+          `- 본인 국민연금: ${money(result.afterFirstDeath.ownNationalPension)}`,
+          `- 유족연금 전액: ${money(result.afterFirstDeath.survivorPensionFull)}`,
+          `- 선택 국민연금: ${money(result.afterFirstDeath.selectedNationalPension)}`,
+          `- 기초연금: ${money(result.afterFirstDeath.basicPension)}`,
+          `- 기타 개인·퇴직연금: ${money(result.afterFirstDeath.additionalPrivatePension)}`,
+          `- 전체 예상 연금소득: ${money(result.afterFirstDeath.totalNetPension)}`,
+          `- 판단: ${result.afterFirstDeath.decisionText}`,
+        ]
+      : ['해당 없음']),
+    '',
+    '## 10. 계산 경고',
     '',
     ...warnings,
     '',
-    '## 8. 추가로 AI에게 알려주면 분석이 좋아지는 정보',
+    '## 11. AI에게 확인 요청할 사항',
     '',
     '- 현재 현금성 자산, 주택담보대출·기타 부채와 금리',
     '- 은퇴 전후 실제 월지출과 의료·간병·주거비 계획',

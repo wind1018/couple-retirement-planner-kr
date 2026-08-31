@@ -33,6 +33,7 @@ import {
   incomeTimelineSnapshot,
 } from '../lib/income-timeline.ts';
 import { buildAiAnalysisMarkdown } from '../lib/ai-analysis-markdown.ts';
+import { buildHouseholdCashflow } from '../lib/household-cashflow.ts';
 
 const person = (overrides: Partial<PersonInput> = {}): PersonInput => ({
   enabled: true,
@@ -668,12 +669,167 @@ void test('AI 상담용 Markdown은 계산 결과를 담고 생년월일 전체�
       annualInflationRate: 2,
     },
     plannerNetReturnRate: 2,
+    householdFinance: { assets: [], debts: [], recurringIncomes: [] },
+    includeLateLifeGap: true,
     generatedAt: new Date('2026-08-31T00:00:00.000Z'),
   });
 
-  assert.match(markdown, /# AI 상담용 부부 연금·은퇴 현황/);
+  assert.match(markdown, /# AI 상담용 부부 연금·은퇴 종합현황/);
+  assert.match(markdown, /schema_version: "2.0"/);
+  assert.match(markdown, /## 0\. 계산 완성도/);
   assert.match(markdown, /## AI에게 요청할 분석/);
   assert.match(markdown, /본인 60세/);
   assert.match(markdown, /노후 부부 적정 생활비/);
   assert.doesNotMatch(markdown, /19800101/);
+});
+
+void test('부분은퇴부터 부족을 찾고 여러 부족구간과 실제 PV를 분리', () => {
+  const result = simulate(
+    person({
+      name: '본인',
+      birth: '19750101',
+      anchoredMonthlyPension: 1_854_240,
+      claimAge: 65,
+      retirementAge: 60,
+      employmentIncomeEnabled: true,
+      preRetirementMonthlyIncome: 6_000_000,
+      deathAge: 95,
+    }),
+    person({
+      name: '배우자',
+      birth: '19790101',
+      anchoredMonthlyPension: 973_390,
+      claimAge: 65,
+      retirementAge: 60,
+      employmentIncomeEnabled: true,
+      preRetirementMonthlyIncome: 2_500_000,
+      deathAge: 95,
+    }),
+    DEFAULT_POLICY,
+  );
+  const analysis = buildHouseholdCashflow({
+    result,
+    livingCost: {
+      reference: 'custom',
+      householdSize: 2,
+      basis: 'median',
+      customBaseYear: 2026,
+      customMonthlyAmount: 3_101_432,
+      annualInflationRate: 2,
+      survivorMode: 'ratio',
+      survivorRatio: 75,
+    },
+    finance: {
+      assets: [
+        {
+          id: 'home',
+          name: '실거주 주택',
+          type: 'primary_home',
+          currentValue: 2_800_000_000,
+          retirementLiquidity: 'exclude',
+        },
+        {
+          id: 'office',
+          name: '오피스텔',
+          type: 'officetel',
+          currentValue: 120_000_000,
+          retirementLiquidity: 'sellable',
+          rental: {
+            enabled: true,
+            grossMonthlyRent: 600_000,
+            vacancyRate: 0,
+            operatingExpenseRate: 0,
+            estimatedTaxRate: 0,
+          },
+        },
+      ],
+      debts: [{ id: 'loan', name: '대출', principal: 500_000_000 }],
+      recurringIncomes: [
+        {
+          id: 'bridge',
+          name: '한시 기타소득',
+          monthlyAmount: 2_000_000,
+          startYear: 2044,
+          endYear: 2050,
+          estimatedTaxRate: 0,
+        },
+      ],
+    },
+    annualNetReturnRate: 2,
+    includeLateLifeGap: true,
+    currentYear: 2026,
+  });
+
+  const row2035 = analysis.rows.find((row) => row.year === 2035);
+  assert.equal(row2035?.livingCost, 3_706_498);
+  assert.equal(row2035?.rentalIncomeNet, 600_000);
+  assert.equal(row2035?.monthlyGap, 606_498);
+  assert.equal(analysis.firstGapYear, 2035);
+  assert.ok(analysis.gapPeriods.length >= 2);
+  assert.ok(analysis.exactGapPresentValue < analysis.conservativeStressCapital);
+  assert.equal(analysis.finance.primaryHomeValue, 2_800_000_000);
+  assert.equal(analysis.finance.retirementAvailableAssets, 120_000_000);
+  assert.ok(
+    analysis.warnings.some(
+      (warning) => warning.code === 'DEBT_SERVICE_MISSING',
+    ),
+  );
+});
+
+void test('첫 사망 후 생활비 비율과 유족연금 전환연도는 일치', () => {
+  const result = simulate(
+    person({ birth: '19800101', deathAge: 85 }),
+    person({ name: '배우자', birth: '19820101', deathAge: 90 }),
+    DEFAULT_POLICY,
+  );
+  assert.equal(result.afterFirstDeath?.year, 2066);
+  assert.equal(result.survivorRows[0]?.year, 2066);
+  assert.equal(result.survivorDecision, result.afterFirstDeath?.decisionText);
+
+  const analysis = buildHouseholdCashflow({
+    result,
+    livingCost: {
+      reference: 'custom',
+      householdSize: 2,
+      basis: 'median',
+      customBaseYear: 2026,
+      customMonthlyAmount: 4_000_000,
+      annualInflationRate: 0,
+      survivorMode: 'ratio',
+      survivorRatio: 75,
+    },
+    finance: { assets: [], debts: [], recurringIncomes: [] },
+    annualNetReturnRate: 2,
+    includeLateLifeGap: true,
+    currentYear: 2026,
+  });
+  assert.equal(
+    analysis.rows.find((row) => row.year === 2066)?.livingCost,
+    3_000_000,
+  );
+});
+
+void test('예상 사망 나이 100세까지 연금 행과 현금흐름을 생성', () => {
+  const result = simulate(
+    person({ birth: '19800101', deathAge: 100 }),
+    person({ enabled: false, hasNps: false, name: '배우자' }),
+    DEFAULT_POLICY,
+  );
+  assert.equal(result.rows.at(-1)?.ageA, 100);
+  const analysis = buildHouseholdCashflow({
+    result,
+    livingCost: {
+      reference: 'custom',
+      householdSize: 1,
+      basis: 'minimum',
+      customBaseYear: 2026,
+      customMonthlyAmount: 2_000_000,
+      annualInflationRate: 0,
+    },
+    finance: { assets: [], debts: [], recurringIncomes: [] },
+    annualNetReturnRate: 2,
+    includeLateLifeGap: true,
+    currentYear: 2026,
+  });
+  assert.equal(analysis.rows.at(-1)?.ageA, 100);
 });

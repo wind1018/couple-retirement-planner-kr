@@ -19,6 +19,23 @@
     { "from": 120, "to": 240, "rate": 0.5 },
     { "from": 240, "rate": 0.6 }
   ],
+  "basicPension": {
+    "baseYear": 2026,
+    "standardMonthly": 349700,
+    "coupleEachMonthly": 279760
+  },
+  "livingCostBenchmarks": {
+    "general": {
+      "baseYear": 2026,
+      "minimum": [820556, 1343773, 1714892, 2078316, 2418150, 2737905, 3044848],
+      "median": [2564238, 4199292, 5359036, 6494738, 7556719, 8555952, 9515150]
+    },
+    "retiredCouple": {
+      "baseYear": 2024,
+      "minimum": 2166000,
+      "median": 2981000
+    }
+  },
   "npsGuides": [
     {
       "id": "normal",

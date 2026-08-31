@@ -31,6 +31,7 @@ import {
   YAxis,
 } from 'recharts';
 import { Badge } from '@/components/ui/badge';
+import { HouseholdFinanceControls } from '@/components/household-finance-controls';
 import { Button } from '@/components/ui/button';
 import {
   Card,
@@ -74,8 +75,6 @@ import {
   validatePolicy,
 } from '@/lib/nps-engine';
 import {
-  analyzeHouseholdRetirement,
-  employmentIncomeAtYear,
   legacyGoalsToTimelines,
   PensionGoalRange,
   PensionGoalTimelines,
@@ -86,8 +85,6 @@ import {
 } from '@/lib/income-timeline';
 import {
   addBasicPensionToResult,
-  BASIC_PENSION_COUPLE_EACH_MONTHLY,
-  BASIC_PENSION_STANDARD_MONTHLY,
   BasicPensionSettings,
   basicPensionBothAliveMonthly,
   defaultBasicPensionSettings,
@@ -105,6 +102,12 @@ import {
   saveEncryptedSession,
 } from '@/lib/secure-session';
 import { buildAiAnalysisMarkdown } from '@/lib/ai-analysis-markdown';
+import {
+  buildHouseholdCashflow,
+  defaultHouseholdFinanceSettings,
+  type HouseholdCashflowRow,
+  type HouseholdFinanceSettings,
+} from '@/lib/household-cashflow';
 
 type FormState = {
   a: PersonInput;
@@ -116,12 +119,21 @@ type FormState = {
   npsInflation: NationalPensionInflationSettings;
   basicPension: BasicPensionSettings;
   livingCost: LivingCostSettings;
+  householdFinance: HouseholdFinanceSettings;
 };
-type SavedForm = Omit<FormState, 'pensionGoalTimelines'> & {
+type SavedForm = Omit<
+  FormState,
+  'pensionGoalTimelines' | 'householdFinance'
+> & {
   pensionGoalTimelines?: PensionGoalTimelines;
   pensionGoals?: PensionGoalRange[];
+  householdFinance?: HouseholdFinanceSettings;
 };
-type SavedProfile = { form: SavedForm; policy: Policy };
+type SavedProfile = {
+  formSchemaVersion?: '2.0';
+  form: SavedForm;
+  policy: Policy;
+};
 type ProfileFileHandle = {
   name: string;
   getFile: () => Promise<File>;
@@ -195,6 +207,7 @@ const initialForm = (): FormState => ({
   npsInflation: defaultNationalPensionInflationSettings(),
   basicPension: defaultBasicPensionSettings(),
   livingCost: defaultLivingCostSettings(),
+  householdFinance: defaultHouseholdFinanceSettings(),
 });
 const money = (n: number) => `${Math.round(n).toLocaleString('ko-KR')}원`;
 const digits = (value: string) => Number(value.replace(/\D/g, '')) || 0;
@@ -746,8 +759,8 @@ export function PensionGoalEditor({
           <div>
             <CardTitle>구간별 목표 월연금</CardTitle>
             <CardDescription>
-              본인 나이 구간을 기준으로 세후 목표액을 각각 입력하세요. 부부
-              합산 목표는 자동 계산됩니다.
+              본인 나이 구간을 기준으로 세후 목표액을 각각 입력하세요. 부부 합산
+              목표는 자동 계산됩니다.
             </CardDescription>
           </div>
           <Button type="button" variant="outline" onClick={addGoal}>
@@ -1333,12 +1346,14 @@ function AdditionalPensionStrategyControls({
 
 function PublicPensionAndLivingCostControls({
   people,
+  policy,
   basicPension,
   livingCost,
   setBasicPension,
   setLivingCost,
 }: {
   people: { a: PersonInput; b: PersonInput };
+  policy: Policy;
   basicPension: BasicPensionSettings;
   livingCost: LivingCostSettings;
   setBasicPension: (settings: BasicPensionSettings) => void;
@@ -1348,10 +1363,16 @@ function PublicPensionAndLivingCostControls({
     Number(basicPension.a) + Number(people.b.enabled && basicPension.b);
   const eachAmount =
     recipients >= 2
-      ? BASIC_PENSION_COUPLE_EACH_MONTHLY
-      : BASIC_PENSION_STANDARD_MONTHLY;
-  const livingCostBase = livingCostMonthly(livingCost, 2026);
+      ? policy.basicPension.coupleEachMonthly
+      : policy.basicPension.standardMonthly;
+  const livingCostBase = livingCostMonthly(
+    livingCost,
+    policy.livingCostBenchmarks.general.baseYear,
+    false,
+    policy,
+  );
   const retiredCouple = livingCost.reference === 'retiredCouple';
+  const customLivingCost = livingCost.reference === 'custom';
   return (
     <Card className="border-cyan-200 bg-cyan-50/30">
       <CardHeader className="border-b border-cyan-100">
@@ -1363,7 +1384,9 @@ function PublicPensionAndLivingCostControls({
               생활비 기준을 종합 보고서에 즉시 반영합니다.
             </CardDescription>
           </div>
-          <Badge className="bg-cyan-800 text-white">2026년 기준</Badge>
+          <Badge className="bg-cyan-800 text-white">
+            정책 {policy.policyId}
+          </Badge>
         </div>
       </CardHeader>
       <CardContent className="grid gap-4 pt-5 xl:grid-cols-2">
@@ -1371,7 +1394,7 @@ function PublicPensionAndLivingCostControls({
           <h3 className="font-black">기초연금 적용 여부</h3>
           <p className="mt-1 text-xs leading-5 text-slate-500">
             만 65세부터 적용합니다. 부부가 모두 선택되면 각각 20% 감액한 월{' '}
-            {money(BASIC_PENSION_COUPLE_EACH_MONTHLY)}을 반영합니다.
+            {money(policy.basicPension.coupleEachMonthly)}을 반영합니다.
           </p>
           <div className="mt-4 grid gap-3 sm:grid-cols-2">
             <label className="flex items-start gap-2 rounded-lg border border-slate-200 p-3">
@@ -1409,8 +1432,9 @@ function PublicPensionAndLivingCostControls({
             </label>
           </div>
           <p className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
-            2026년 기준 단독 최대 월 {money(BASIC_PENSION_STANDARD_MONTHLY)}.
-            실제 금액은 소득인정액·국민연금액·부부감액 심사에 따라 달라집니다.
+            {policy.basicPension.baseYear}년 기준 단독 최대 월{' '}
+            {money(policy.basicPension.standardMonthly)}. 실제 금액은
+            소득인정액·국민연금액·부부감액 심사에 따라 달라집니다.
             <a
               className="ml-1 font-bold text-blue-700 underline underline-offset-2"
               href="https://basicpension.mohw.go.kr/menu.es?mid=a10103010000"
@@ -1429,14 +1453,16 @@ function PublicPensionAndLivingCostControls({
             생활비를 선택하고, 기대 물가상승률로 매년 증가시켜 표시합니다.
           </p>
           <fieldset
-            className="mt-4 grid grid-cols-2 gap-2"
+            className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-3"
             aria-label="생활비 조사 대상"
           >
             <Button
               type="button"
-              variant={retiredCouple ? 'outline' : 'default'}
+              variant={
+                livingCost.reference === 'general' ? 'default' : 'outline'
+              }
               className="h-auto min-h-12 flex-col py-2"
-              aria-pressed={!retiredCouple}
+              aria-pressed={livingCost.reference === 'general'}
               onClick={() =>
                 setLivingCost({ ...livingCost, reference: 'general' })
               }
@@ -1460,9 +1486,35 @@ function PublicPensionAndLivingCostControls({
                 은퇴 후 최소·적정 생활비
               </span>
             </Button>
+            <Button
+              type="button"
+              variant={customLivingCost ? 'default' : 'outline'}
+              className="h-auto min-h-12 flex-col py-2"
+              aria-pressed={customLivingCost}
+              onClick={() =>
+                setLivingCost({ ...livingCost, reference: 'custom' })
+              }
+            >
+              <span className="font-black">우리 집 실제 생활비</span>
+              <span className="text-[11px] opacity-80">직접 입력 기준</span>
+            </Button>
           </fieldset>
           <div className="mt-3 grid gap-3 sm:grid-cols-3">
-            {retiredCouple ? (
+            {customLivingCost ? (
+              <label className="grid gap-1.5">
+                <span className="field-label">기준연도</span>
+                <Input
+                  inputMode="numeric"
+                  value={livingCost.customBaseYear ?? 2026}
+                  onChange={(event) =>
+                    setLivingCost({
+                      ...livingCost,
+                      customBaseYear: digits(event.target.value),
+                    })
+                  }
+                />
+              </label>
+            ) : retiredCouple ? (
               <div className="grid gap-1.5">
                 <span className="field-label">가구 구성</span>
                 <div className="flex h-8 items-center rounded-lg border border-slate-200 bg-slate-50 px-3 text-sm font-bold text-slate-700">
@@ -1489,25 +1541,43 @@ function PublicPensionAndLivingCostControls({
                 </NativeSelect>
               </label>
             )}
-            <label className="grid gap-1.5">
-              <span className="field-label">비교 기준</span>
-              <NativeSelect
-                value={livingCost.basis}
-                onChange={(event) =>
-                  setLivingCost({
-                    ...livingCost,
-                    basis: event.target.value as LivingCostSettings['basis'],
-                  })
-                }
-              >
-                <NativeSelectOption value="minimum">
-                  {retiredCouple ? '노후 최소생활비' : '생계급여 기준 32%'}
-                </NativeSelectOption>
-                <NativeSelectOption value="median">
-                  {retiredCouple ? '노후 적정생활비' : '기준중위소득 100%'}
-                </NativeSelectOption>
-              </NativeSelect>
-            </label>
+            {customLivingCost ? (
+              <label className="grid gap-1.5">
+                <span className="field-label">현재 월 생활비</span>
+                <Input
+                  inputMode="numeric"
+                  value={(livingCost.customMonthlyAmount ?? 0).toLocaleString(
+                    'ko-KR',
+                  )}
+                  onChange={(event) =>
+                    setLivingCost({
+                      ...livingCost,
+                      customMonthlyAmount: digits(event.target.value),
+                    })
+                  }
+                />
+              </label>
+            ) : (
+              <label className="grid gap-1.5">
+                <span className="field-label">비교 기준</span>
+                <NativeSelect
+                  value={livingCost.basis}
+                  onChange={(event) =>
+                    setLivingCost({
+                      ...livingCost,
+                      basis: event.target.value as LivingCostSettings['basis'],
+                    })
+                  }
+                >
+                  <NativeSelectOption value="minimum">
+                    {retiredCouple ? '노후 최소생활비' : '생계급여 기준 32%'}
+                  </NativeSelectOption>
+                  <NativeSelectOption value="median">
+                    {retiredCouple ? '노후 적정생활비' : '기준중위소득 100%'}
+                  </NativeSelectOption>
+                </NativeSelect>
+              </label>
+            )}
             <label className="grid gap-1.5">
               <span className="field-label">기대 물가상승률</span>
               <div className="flex items-center gap-2">
@@ -1532,7 +1602,12 @@ function PublicPensionAndLivingCostControls({
             </label>
           </div>
           <p className="mt-3 rounded-lg bg-cyan-50 px-3 py-2 text-xs font-semibold leading-5 text-cyan-950">
-            {retiredCouple ? (
+            {customLivingCost ? (
+              <>
+                직접 입력한 월 생활비를 2026년 가치로 환산하면{' '}
+                <b>{money(livingCostBase)}</b>
+              </>
+            ) : retiredCouple ? (
               <>
                 국민연금연구원 2024년 조사 기준 · 부부{' '}
                 {livingCost.basis === 'minimum' ? '최소' : '적정'} 생활비를
@@ -1547,21 +1622,109 @@ function PublicPensionAndLivingCostControls({
                 월 {money(livingCostBase)}
               </>
             )}
-            <a
-              className="ml-1 text-blue-700 underline underline-offset-2"
-              href={
-                retiredCouple
-                  ? 'https://www.nps.or.kr/pnsgdnc/nscvrgdata/getOHAE0002M1.do?hmpgBbsCd=BS20240145&hmpgCd=01&menuId=MN24000898&pageIndex=1&pstId=ZZ202500000000001624&sortSe=FR'
-                  : 'https://www.mohw.go.kr/menu.es?mid=a10708010300'
-              }
-              target="_blank"
-              rel="noreferrer"
-            >
-              {retiredCouple
-                ? '국민연금공단 조사 확인'
-                : '보건복지부 기준 확인'}
-            </a>
+            {!customLivingCost && (
+              <a
+                className="ml-1 text-blue-700 underline underline-offset-2"
+                href={
+                  retiredCouple
+                    ? 'https://www.nps.or.kr/pnsgdnc/nscvrgdata/getOHAE0002M1.do?hmpgBbsCd=BS20240145&hmpgCd=01&menuId=MN24000898&pageIndex=1&pstId=ZZ202500000000001624&sortSe=FR'
+                    : 'https://www.mohw.go.kr/menu.es?mid=a10708010300'
+                }
+                target="_blank"
+                rel="noreferrer"
+              >
+                {retiredCouple
+                  ? '국민연금공단 조사 확인'
+                  : '보건복지부 기준 확인'}
+              </a>
+            )}
           </p>
+          <div className="mt-4 rounded-xl border border-violet-200 bg-violet-50/50 p-4">
+            <h4 className="font-black text-violet-950">
+              첫 사망 후 생존자 1인 생활비
+            </h4>
+            <p className="mt-1 text-xs leading-5 text-violet-800">
+              예상 사망 나이가 되는 연도 말까지 생존한 것으로 보고, 다음
+              연도부터 선택한 1인 생활비를 적용합니다.
+            </p>
+            <div className="mt-3 grid gap-3 sm:grid-cols-3">
+              <label className="grid gap-1.5">
+                <span className="field-label">적용 방식</span>
+                <NativeSelect
+                  value={livingCost.survivorMode ?? 'same_as_couple'}
+                  onChange={(event) =>
+                    setLivingCost({
+                      ...livingCost,
+                      survivorMode: event.target
+                        .value as LivingCostSettings['survivorMode'],
+                    })
+                  }
+                >
+                  <NativeSelectOption value="same_as_couple">
+                    부부 생활비와 동일
+                  </NativeSelectOption>
+                  <NativeSelectOption value="ratio">
+                    부부 생활비의 비율
+                  </NativeSelectOption>
+                  <NativeSelectOption value="custom">
+                    월 생활비 직접 입력
+                  </NativeSelectOption>
+                </NativeSelect>
+              </label>
+              {(livingCost.survivorMode ?? 'same_as_couple') === 'ratio' && (
+                <label className="grid gap-1.5">
+                  <span className="field-label">부부 생활비 대비 비율(%)</span>
+                  <Input
+                    type="number"
+                    min="0"
+                    max="100"
+                    value={livingCost.survivorRatio ?? 75}
+                    onChange={(event) =>
+                      setLivingCost({
+                        ...livingCost,
+                        survivorRatio: Math.min(
+                          100,
+                          Math.max(0, Number(event.target.value) || 0),
+                        ),
+                      })
+                    }
+                  />
+                </label>
+              )}
+              {(livingCost.survivorMode ?? 'same_as_couple') === 'custom' && (
+                <>
+                  <label className="grid gap-1.5">
+                    <span className="field-label">1인 생활비 기준연도</span>
+                    <Input
+                      inputMode="numeric"
+                      value={livingCost.survivorBaseYear ?? 2026}
+                      onChange={(event) =>
+                        setLivingCost({
+                          ...livingCost,
+                          survivorBaseYear: digits(event.target.value),
+                        })
+                      }
+                    />
+                  </label>
+                  <label className="grid gap-1.5">
+                    <span className="field-label">1인 월 생활비</span>
+                    <Input
+                      inputMode="numeric"
+                      value={(
+                        livingCost.survivorMonthlyAmount ?? 0
+                      ).toLocaleString('ko-KR')}
+                      onChange={(event) =>
+                        setLivingCost({
+                          ...livingCost,
+                          survivorMonthlyAmount: digits(event.target.value),
+                        })
+                      }
+                    />
+                  </label>
+                </>
+              )}
+            </div>
+          </div>
         </section>
       </CardContent>
     </Card>
@@ -2290,6 +2453,8 @@ function HouseholdRetirementSettings({
   setPerson,
   netReturnRate,
   setNetReturnRate,
+  includeLateLifeGap,
+  setIncludeLateLifeGap,
 }: {
   people: { a: PersonInput; b: PersonInput };
   setPerson: (
@@ -2301,6 +2466,8 @@ function HouseholdRetirementSettings({
   ) => void;
   netReturnRate: number;
   setNetReturnRate: (rate: number) => void;
+  includeLateLifeGap: boolean;
+  setIncludeLateLifeGap: (enabled: boolean) => void;
 }) {
   return (
     <Card className="border-emerald-200 bg-emerald-50/40">
@@ -2356,7 +2523,7 @@ function HouseholdRetirementSettings({
                       applyPatch({ employmentIncomeEnabled: value === true })
                     }
                   />
-                  {person.name}({owner.toUpperCase()}) 가구 근로·사업소득 참여
+                  {person.name} 가구 근로·사업소득 참여
                 </label>
                 <div className="mt-3 grid gap-3 sm:grid-cols-2">
                   <label className="grid gap-1.5">
@@ -2415,24 +2582,41 @@ function HouseholdRetirementSettings({
             );
           })}
         </div>
-        <label className="grid gap-1.5 rounded-xl border border-emerald-100 bg-white p-4 sm:max-w-xs">
-          <span className="field-label">생활비 공백 준비 기대 순수익률</span>
-          <div className="flex items-center gap-2">
-            <Input
-              type="number"
-              min="0"
-              max="10"
-              step="0.1"
-              value={netReturnRate}
-              onChange={(event) =>
-                setNetReturnRate(
-                  Math.min(10, Math.max(0, Number(event.target.value) || 0)),
-                )
-              }
+        <div className="grid gap-3 lg:grid-cols-2">
+          <label className="grid gap-1.5 rounded-xl border border-emerald-100 bg-white p-4">
+            <span className="field-label">생활비 공백 준비 기대 순수익률</span>
+            <div className="flex items-center gap-2">
+              <Input
+                type="number"
+                min="0"
+                max="10"
+                step="0.1"
+                value={netReturnRate}
+                onChange={(event) =>
+                  setNetReturnRate(
+                    Math.min(10, Math.max(0, Number(event.target.value) || 0)),
+                  )
+                }
+              />
+              <span className="text-sm font-bold">%</span>
+            </div>
+          </label>
+          <label className="flex items-start gap-3 rounded-xl border border-violet-200 bg-white p-4">
+            <Checkbox
+              checked={includeLateLifeGap}
+              onCheckedChange={(value) => setIncludeLateLifeGap(value === true)}
             />
-            <span className="text-sm font-bold">%</span>
-          </div>
-        </label>
+            <span>
+              <b className="block text-sm text-violet-950">
+                첫 사망 이후 후기 부족까지 기본 필요재원에 포함
+              </b>
+              <small className="mt-1 block leading-5 text-slate-500">
+                해제하면 첫 사망 이후 부족은 별도 후기 위험으로 표시하고 기본
+                준비재원에서는 분리합니다.
+              </small>
+            </span>
+          </label>
+        </div>
       </CardContent>
     </Card>
   );
@@ -2440,11 +2624,14 @@ function HouseholdRetirementSettings({
 
 function IncomeEventTimeline({
   result,
+  policy,
   livingCost,
   chartData,
   livingCostLegend,
+  cashflowRows,
 }: {
   result: SimulationResult;
+  policy: Policy;
   livingCost: LivingCostSettings;
   chartData: Array<{
     year: number;
@@ -2456,12 +2643,13 @@ function IncomeEventTimeline({
     gap: number;
   }>;
   livingCostLegend: string;
+  cashflowRows: HouseholdCashflowRow[];
 }) {
   const currentYear = new Date().getFullYear();
   const startYear = currentYear;
   const endYear = Math.max(
     startYear + 1,
-    result.rows.at(-1)?.year ?? startYear + 1,
+    cashflowRows.at(-1)?.year ?? startYear + 1,
   );
   const eventGroups = useMemo(
     () =>
@@ -2483,10 +2671,14 @@ function IncomeEventTimeline({
   )
     ? selectedEventId
     : (eventGroups[0]?.id ?? '');
+  const selectedCashflow =
+    cashflowRows.find((row) => row.year === visibleSelectedYear) ??
+    cashflowRows[0];
   const selectedSnapshot = incomeTimelineSnapshot(
     result,
     visibleSelectedYear,
-    livingCostMonthly(livingCost, visibleSelectedYear),
+    selectedCashflow?.livingCost ??
+      livingCostMonthly(livingCost, visibleSelectedYear, false, policy),
   );
   const selectedEvents = eventGroups.find(
     (group) => group.year === visibleSelectedYear,
@@ -2527,10 +2719,11 @@ function IncomeEventTimeline({
           </p>
         </div>
         <Badge className="bg-emerald-700 px-3 py-1 text-white">
-          {visibleSelectedYear}년 · {result.a.name} {selectedSnapshot.ageA}세
-          {selectedSnapshot.ageB == null
+          {visibleSelectedYear}년 · {result.a.name}{' '}
+          {selectedCashflow?.ageA ?? selectedSnapshot.ageA}세
+          {(selectedCashflow?.ageB ?? selectedSnapshot.ageB) == null
             ? ''
-            : ` · ${result.b?.name ?? '배우자'} ${selectedSnapshot.ageB}세`}
+            : ` · ${result.b?.name ?? '배우자'} ${selectedCashflow?.ageB ?? selectedSnapshot.ageB}세`}
         </Badge>
       </div>
       <div className="mt-4 rounded-xl border border-emerald-100 bg-white p-4">
@@ -2581,7 +2774,7 @@ function IncomeEventTimeline({
                 formatter={(value, name) => [
                   money(Number(value)),
                   name === 'actual'
-                    ? '예상 세후 가구소득(근로+연금)'
+                    ? '부채상환 후 가구 현금소득'
                     : name === 'essential'
                       ? livingCostLegend
                       : '생활비 기준 부족액',
@@ -2590,7 +2783,7 @@ function IncomeEventTimeline({
               <Legend
                 formatter={(value) =>
                   value === 'actual'
-                    ? '예상 세후 가구소득(근로+연금)'
+                    ? '부채상환 후 가구 현금소득'
                     : value === 'essential'
                       ? livingCostLegend
                       : '생활비 기준 부족액'
@@ -2621,7 +2814,7 @@ function IncomeEventTimeline({
                 dot={false}
               />
               <ReferenceLine
-                x={`${selectedSnapshot.ageA}세`}
+                x={`${selectedCashflow?.ageA ?? selectedSnapshot.ageA}세`}
                 stroke="#047857"
                 strokeWidth={2}
                 strokeDasharray="4 4"
@@ -2700,42 +2893,57 @@ function IncomeEventTimeline({
       </div>
       <div className="mt-3 grid gap-3 md:grid-cols-3">
         <Metric
-          label={`${visibleSelectedYear}년 예상 세후 가구소득`}
-          value={money(selectedSnapshot.householdIncome)}
-          note={`근로 ${money(selectedSnapshot.employmentA + selectedSnapshot.employmentB)} + 연금 ${money(selectedSnapshot.pensionNetA + selectedSnapshot.pensionNetB)}`}
+          label={`${visibleSelectedYear}년 예상 가구 현금소득`}
+          value={money(
+            selectedCashflow?.householdCashIncomeAfterDebt ??
+              selectedSnapshot.householdIncome,
+          )}
+          note={
+            selectedCashflow
+              ? `근로 ${money(selectedCashflow.employmentIncome)} + 연금 ${money(selectedCashflow.nationalPension + selectedCashflow.basicPension + selectedCashflow.privatePension)} + 임대·기타 ${money(selectedCashflow.rentalIncomeNet + selectedCashflow.otherIncome)} - 부채상환 ${money(selectedCashflow.debtService)}`
+              : `근로 ${money(selectedSnapshot.employmentA + selectedSnapshot.employmentB)} + 연금 ${money(selectedSnapshot.pensionNetA + selectedSnapshot.pensionNetB)}`
+          }
         />
         <Metric
           label={`${visibleSelectedYear}년 ${livingCostLabel(livingCost)}`}
-          value={money(selectedSnapshot.livingCost)}
+          value={money(
+            selectedCashflow?.livingCost ?? selectedSnapshot.livingCost,
+          )}
           note="선택한 물가상승률을 반영한 해당 연도 명목금액"
         />
         <Metric
           label="생활비 기준과의 월 차이"
           value={
-            selectedSnapshot.gap > 0
-              ? `-${money(selectedSnapshot.gap)}`
-              : money(selectedSnapshot.surplus)
+            (selectedCashflow?.monthlyGap ?? selectedSnapshot.gap) > 0
+              ? `-${money(selectedCashflow?.monthlyGap ?? selectedSnapshot.gap)}`
+              : money(
+                  selectedCashflow?.monthlySurplus ?? selectedSnapshot.surplus,
+                )
           }
           note={
-            selectedSnapshot.gap > 0
+            (selectedCashflow?.monthlyGap ?? selectedSnapshot.gap) > 0
               ? '이 연도에만 해당하는 부족 추정액'
               : '이 연도 생활비 기준을 넘는 여유액'
           }
-          tone={selectedSnapshot.gap > 0 ? 'danger' : 'default'}
+          tone={
+            (selectedCashflow?.monthlyGap ?? selectedSnapshot.gap) > 0
+              ? 'danger'
+              : 'default'
+          }
         />
       </div>
       <div
         className={`mt-3 rounded-lg border px-4 py-3 text-sm leading-6 ${
-          selectedSnapshot.gap > 0
+          (selectedCashflow?.monthlyGap ?? selectedSnapshot.gap) > 0
             ? 'border-amber-300 bg-amber-50 text-amber-950'
             : 'border-emerald-300 bg-white text-emerald-950'
         }`}
       >
         <b>
           {visibleSelectedYear}년 기준{' '}
-          {selectedSnapshot.gap > 0
-            ? `생활비보다 월 ${money(selectedSnapshot.gap)} 적게 예상됩니다.`
-            : `생활비보다 월 ${money(selectedSnapshot.surplus)} 여유가 예상됩니다.`}
+          {(selectedCashflow?.monthlyGap ?? selectedSnapshot.gap) > 0
+            ? `생활비보다 월 ${money(selectedCashflow?.monthlyGap ?? selectedSnapshot.gap)} 적게 예상됩니다.`
+            : `생활비보다 월 ${money(selectedCashflow?.monthlySurplus ?? selectedSnapshot.surplus)} 여유가 예상됩니다.`}
         </b>
         <span className="ml-2 text-xs">
           이 차이는 평생 고정되지 않으며 은퇴·연금 개시·수령 종료 사건마다
@@ -2767,10 +2975,17 @@ function IncomeEventTimeline({
             ))}
           </TabsList>
           {eventGroups.map((group) => {
+            const cashflow = cashflowRows.find(
+              (row) => row.year === group.year,
+            );
+            const previousCashflow = cashflowRows.find(
+              (row) => row.year === Math.max(startYear, group.year - 1),
+            );
             const snapshot = incomeTimelineSnapshot(
               result,
               group.year,
-              livingCostMonthly(livingCost, group.year),
+              cashflow?.livingCost ??
+                livingCostMonthly(livingCost, group.year, false, policy),
             );
             const previous = incomeTimelineSnapshot(
               result,
@@ -2778,6 +2993,8 @@ function IncomeEventTimeline({
               livingCostMonthly(
                 livingCost,
                 Math.max(startYear, group.year - 1),
+                false,
+                policy,
               ),
             );
             return (
@@ -2857,17 +3074,37 @@ function IncomeEventTimeline({
                       <br />
                       가구 합산{' '}
                       {money(
-                        snapshot.householdIncome - previous.householdIncome,
+                        (cashflow?.householdCashIncomeAfterDebt ??
+                          snapshot.householdIncome) -
+                          (previousCashflow?.householdCashIncomeAfterDebt ??
+                            previous.householdIncome),
+                      )}
+                      {cashflow && (
+                        <>
+                          <br />
+                          임대·기타소득{' '}
+                          {money(
+                            cashflow.rentalIncomeNet + cashflow.otherIncome,
+                          )}
+                          <br />
+                          월 부채상환 -{money(cashflow.debtService)}
+                        </>
                       )}
                     </p>
                   </div>
                 </div>
                 <p className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
-                  {group.year}년 생활비 {money(snapshot.livingCost)} 대비 예상
-                  소득 {money(snapshot.householdIncome)}로, 월{' '}
-                  {snapshot.gap > 0
-                    ? `${money(snapshot.gap)} 부족`
-                    : `${money(snapshot.surplus)} 여유`}
+                  {group.year}년 생활비{' '}
+                  {money(cashflow?.livingCost ?? snapshot.livingCost)} 대비
+                  부채상환 후 예상 현금소득{' '}
+                  {money(
+                    cashflow?.householdCashIncomeAfterDebt ??
+                      snapshot.householdIncome,
+                  )}
+                  로, 월{' '}
+                  {(cashflow?.monthlyGap ?? snapshot.gap) > 0
+                    ? `${money(cashflow?.monthlyGap ?? snapshot.gap)} 부족`
+                    : `${money(cashflow?.monthlySurplus ?? snapshot.surplus)} 여유`}
                   입니다. 이 값은 해당 연도의 명목금액이며 다음 사건에서 다시
                   바뀝니다.
                 </p>
@@ -3569,58 +3806,72 @@ function PensionGoalReport({
 
 function LivingCostIncomeReport({
   result,
+  policy,
   netReturnRate,
   livingCost,
+  householdFinance,
+  includeLateLifeGap,
 }: {
   result: SimulationResult;
+  policy: Policy;
   netReturnRate: number;
   livingCost: LivingCostSettings;
+  householdFinance: HouseholdFinanceSettings;
+  includeLateLifeGap: boolean;
 }) {
   const currentYear = new Date().getFullYear();
-  const householdRetirement = useMemo(
+  const cashflow = useMemo(
     () =>
-      analyzeHouseholdRetirement(
-        [],
+      buildHouseholdCashflow({
         result,
-        netReturnRate,
-        (year) => livingCostMonthly(livingCost, year),
+        livingCost,
+        finance: householdFinance,
+        annualNetReturnRate: netReturnRate,
+        includeLateLifeGap,
         currentYear,
-      ),
-    [currentYear, livingCost, netReturnRate, result],
-  );
-  const chartData = useMemo(() => {
-    const rowByYear = new Map(result.rows.map((row) => [row.year, row]));
-    const finalYear = Math.max(
+        policy,
+      }),
+    [
       currentYear,
-      result.rows.at(-1)?.year ?? currentYear,
-    );
-    const birthYearA = result.a.birthDate.getFullYear();
-    const birthYearB = result.b?.birthDate.getFullYear() ?? null;
-    return Array.from({ length: finalYear - currentYear + 1 }, (_, index) => {
-      const year = currentYear + index;
-      const row = rowByYear.get(year);
-      const employmentIncome =
-        employmentIncomeAtYear(result.a, year) +
-        employmentIncomeAtYear(result.b, year);
-      const actual = (row?.estimatedNetCombined ?? 0) + employmentIncome;
-      const essential = livingCostMonthly(livingCost, year);
-      return {
-        year,
-        ageA: year - birthYearA,
-        ageB: birthYearB == null ? null : year - birthYearB,
-        label: `${year - birthYearA}세`,
-        actual,
-        essential,
-        gap: Math.max(0, essential - actual),
-      };
-    });
-  }, [currentYear, livingCost, result]);
+      householdFinance,
+      includeLateLifeGap,
+      livingCost,
+      netReturnRate,
+      policy,
+      result,
+    ],
+  );
+  const chartData = useMemo(
+    () =>
+      cashflow.rows.map((row) => ({
+        year: row.year,
+        ageA: row.ageA,
+        ageB: row.ageB,
+        label: `${row.ageA}세`,
+        actual: row.householdCashIncomeAfterDebt,
+        essential: row.livingCost,
+        gap: row.monthlyGap,
+      })),
+    [cashflow.rows],
+  );
   const selectedLivingCostLabel = livingCostLabel(livingCost);
-  const nextIncomeEvent = householdRetirement
-    ? buildIncomeTimelineEvents(result, currentYear).find(
-        (group) => group.year > householdRetirement.retirementYear,
+  const employedPeople = [result.a, result.b].filter(
+    (person): person is NonNullable<typeof person> =>
+      Boolean(person?.enabled && person.employmentIncomeEnabled),
+  );
+  const householdRetirementYear = employedPeople.length
+    ? Math.max(
+        ...employedPeople.map(
+          (person) =>
+            person.birthDate.getFullYear() + (person.retirementAge ?? 60),
+        ),
       )
     : null;
+  const householdRetirementRow =
+    householdRetirementYear == null
+      ? null
+      : (cashflow.rows.find((row) => row.year === householdRetirementYear) ??
+        null);
   return (
     <Card className="border-emerald-200">
       <CardHeader className="border-b border-emerald-100 bg-emerald-50/50">
@@ -3634,148 +3885,273 @@ function LivingCostIncomeReport({
       <CardContent className="grid gap-5 pt-5">
         <IncomeEventTimeline
           result={result}
+          policy={policy}
           livingCost={livingCost}
           chartData={chartData}
           livingCostLegend={selectedLivingCostLabel}
+          cashflowRows={cashflow.rows}
         />
 
-        {householdRetirement && (
-          <section className="rounded-xl border-2 border-amber-200 bg-amber-50/50 p-5">
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div>
-                <h3 className="text-lg font-black text-amber-950">
-                  가구 은퇴 시점의 생활비 전환 확인
-                </h3>
-                <p className="mt-1 text-sm font-bold text-amber-800">
-                  {householdRetirement.retirementYear}년 (본인{' '}
-                  {householdRetirement.ageA}세
-                  {householdRetirement.ageB == null
-                    ? ''
-                    : ` · 배우자 ${householdRetirement.ageB}세`}
-                  ) · 가구 근로·사업소득이 모두 끝나는 첫해
-                </p>
-              </div>
-              <Badge className="bg-amber-700">
-                시점이 명시된 1개 연도 비교
-              </Badge>
+        <section className="rounded-xl border-2 border-slate-200 bg-slate-50/60 p-5">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h3 className="text-lg font-black text-slate-950">
+                자산·부채와 반복소득 요약
+              </h3>
+              <p className="mt-1 text-xs leading-5 text-slate-600">
+                순자산과 생활비에 실제 사용할 수 있는 자산은 다르게 계산합니다.
+                실거주 주택은 매각 계획이 없으면 은퇴 활용 가능 자산에서
+                제외됩니다.
+              </p>
             </div>
-            <div className="mt-4 grid gap-3 md:grid-cols-3">
-              <Metric
-                label={`${householdRetirement.retirementYear}년 ${selectedLivingCostLabel}`}
-                value={money(householdRetirement.essentialMonthlyAtRetirement)}
-                note="선택 물가상승률을 반영한 명목 월 기준"
-              />
-              <Metric
-                label={`${householdRetirement.retirementYear}년 예상 세후 연금소득`}
-                value={money(householdRetirement.expectedMonthlyAtRetirement)}
-                note="국민·기초·개인·퇴직연금 중 이미 개시된 금액"
-              />
-              <Metric
-                label="해당 연도 생활비 기준과의 월 차이"
-                value={
-                  householdRetirement.monthlyGapAtRetirement > 0
-                    ? `-${money(householdRetirement.monthlyGapAtRetirement)}`
-                    : money(0)
-                }
-                note={
-                  householdRetirement.monthlyGapAtRetirement > 0
-                    ? '가구 은퇴 첫해에만 해당하는 부족 추정액'
-                    : '가구 은퇴 첫해 생활비 기준 충족'
-                }
-                tone={
-                  householdRetirement.monthlyGapAtRetirement > 0
-                    ? 'danger'
-                    : 'default'
-                }
-              />
+            <Badge
+              className={
+                cashflow.finance.completeness.debtService === 'incomplete'
+                  ? 'bg-rose-700'
+                  : 'bg-emerald-700'
+              }
+            >
+              현금흐름 완성도{' '}
+              {cashflow.finance.completeness.debtService === 'incomplete'
+                ? '확인 필요'
+                : '계산 가능'}
+            </Badge>
+          </div>
+          <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+            <Metric
+              label="총자산"
+              value={money(cashflow.finance.grossAssets)}
+              note={`실거주 주택 ${money(cashflow.finance.primaryHomeValue)} 포함`}
+            />
+            <Metric
+              label="총부채"
+              value={`-${money(cashflow.finance.liabilities)}`}
+              note={`기준연도 월 상환 반영 ${money(cashflow.finance.monthlyDebtServiceAtBaseYear)}`}
+              tone={cashflow.finance.liabilities > 0 ? 'danger' : 'default'}
+            />
+            <Metric
+              label="순자산"
+              value={money(cashflow.finance.netWorth)}
+              note="총자산 - 총부채"
+            />
+            <Metric
+              label="은퇴 활용 가능 자산"
+              value={money(cashflow.finance.retirementAvailableAssets)}
+              note="유동·현금화 가능으로 지정한 자산만"
+            />
+          </div>
+          <div className="mt-3 grid gap-3 md:grid-cols-3">
+            <Metric
+              label="기준연도 임대 순수입"
+              value={money(cashflow.finance.monthlyRentalIncomeNetAtBaseYear)}
+              note={`세전 임대료 ${money(cashflow.finance.monthlyRentalIncomeGrossAtBaseYear)} · ${cashflow.finance.completeness.rentalNetIncome === 'partial' ? '비용·세금 일부 미입력' : '입력 항목 차감 완료'}`}
+            />
+            <Metric
+              label="기준연도 기타 반복소득"
+              value={money(cashflow.finance.monthlyOtherIncomeAtBaseYear)}
+              note="등록한 사업·기타 반복소득"
+            />
+            <Metric
+              label="연금 세금 반영 상태"
+              value={
+                result.overallTaxEstimateStatus === 'complete'
+                  ? '세후 추정 완료'
+                  : result.overallTaxEstimateStatus === 'unknown'
+                    ? '세금 미반영 항목 있음'
+                    : '세후 부분 추정'
+              }
+              note="퇴직소득세 등 입력 여부 기준"
+              tone={
+                result.overallTaxEstimateStatus === 'complete'
+                  ? 'default'
+                  : 'danger'
+              }
+            />
+          </div>
+        </section>
+
+        <section className="rounded-xl border-2 border-amber-200 bg-amber-50/50 p-5">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h3 className="text-lg font-black text-amber-950">
+                생활비 부족구간과 필요재원
+              </h3>
+              <p className="mt-1 text-xs leading-5 text-amber-800">
+                현재연도부터 부분은퇴·가구은퇴·연금 종료·첫 사망 이후를 모두
+                계산하고, 흑자 연도가 끼면 부족구간을 따로 나눕니다.
+              </p>
             </div>
-            {householdRetirement.monthlyGapAtRetirement > 0 ? (
-              <>
-                <div className="mt-4 rounded-xl border border-amber-300 bg-white p-4">
-                  <p className="text-base font-black text-amber-950">
-                    {householdRetirement.retirementYear}년 계산식: 생활비{' '}
-                    {money(householdRetirement.essentialMonthlyAtRetirement)} -
-                    당시 개시된 연금{' '}
-                    {money(householdRetirement.expectedMonthlyAtRetirement)} =
-                    월 {money(householdRetirement.monthlyGapAtRetirement)} 차이
-                  </p>
+            <Badge className="bg-amber-700">
+              현재가치 기준 {cashflow.baseYear}년 · 할인율 연{' '}
+              {cashflow.discountRate}%
+            </Badge>
+          </div>
+          <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+            <Metric
+              label="첫 부족연도"
+              value={
+                cashflow.firstGapYear ? `${cashflow.firstGapYear}년` : '없음'
+              }
+              note={
+                cashflow.firstGapYear
+                  ? '가구 전체 은퇴가 아니라 최초 실제 부족 시점'
+                  : '분석 구간의 생활비 기준 충족'
+              }
+            />
+            <Metric
+              label="최대 월 부족액"
+              value={
+                cashflow.maximumMonthlyGap > 0
+                  ? `-${money(cashflow.maximumMonthlyGap)}`
+                  : money(0)
+              }
+              note="각 연도 월 부족액 중 최댓값"
+              tone={cashflow.maximumMonthlyGap > 0 ? 'danger' : 'default'}
+            />
+            <Metric
+              label="실제 부족액 흐름 현재가치"
+              value={money(cashflow.exactGapPresentValue)}
+              note={`${cashflow.baseYear}년 가치 · 연도별 실제 부족액 할인합계`}
+            />
+            <Metric
+              label="스트레스 필요재원 상한"
+              value={money(cashflow.conservativeStressCapital)}
+              note="최대 부족액이 계속된다는 보수적 비교값"
+            />
+          </div>
+          {cashflow.gapPeriods.length > 0 ? (
+            <div className="mt-4 grid gap-3 lg:grid-cols-2">
+              {cashflow.gapPeriods.map((period, index) => (
+                <div
+                  key={`${period.startYear}-${period.phase}`}
+                  className="rounded-xl border border-amber-200 bg-white p-4"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="font-black text-amber-950">
+                      부족구간 {index + 1} · {period.startYear}
+                      {period.endYear === period.startYear
+                        ? '년'
+                        : `~${period.endYear}년`}
+                    </p>
+                    <Badge variant="outline">
+                      {{
+                        working: '은퇴 전',
+                        partial_retirement: '부분은퇴',
+                        full_retirement: '가구은퇴',
+                        survivor: '첫 사망 이후',
+                      }[period.phase] ?? period.phase}
+                    </Badge>
+                  </div>
                   <p className="mt-2 text-sm leading-6 text-slate-700">
-                    이 금액이 은퇴 후 평생 매월 고정 부족하다는 뜻은 아닙니다.
-                    {nextIncomeEvent
-                      ? ` 다음 소득 사건은 ${nextIncomeEvent.year}년의 '${nextIncomeEvent.title}'이며, 그 시점부터 다시 계산됩니다.`
-                      : ' 이후 연금 개시·종료에 따라 연도별 금액이 달라집니다.'}{' '}
-                    위 공통 연도 막대와 사건 탭에서 각 시점을 직접 확인하세요.
+                    최대 월 부족 <b>{money(period.maxMonthlyGap)}</b> · 이
+                    구간의 {cashflow.baseYear}년 기준 현재가치{' '}
+                    <b>{money(period.exactPresentValue)}</b>
                   </p>
                 </div>
-                <div className="mt-4 grid gap-3 lg:grid-cols-2">
-                  <div className="rounded-xl border border-violet-200 bg-white p-4">
-                    <p className="font-black text-violet-900">
-                      기존 개인·퇴직연금의 개시 시점 비교
-                    </p>
-                    <p className="mt-2 text-sm leading-6 text-slate-700">
-                      {householdRetirement.suggestedEarlyAccount ? (
-                        <>
-                          {householdRetirement.suggestedEarlyAccount.ownerName}
-                          의{' '}
-                          <b>
-                            {householdRetirement.suggestedEarlyAccount.name}
-                          </b>
-                          은{' '}
-                          {
-                            householdRetirement.suggestedEarlyAccount
-                              .currentStartYear
-                          }
-                          년(
-                          {
-                            householdRetirement.suggestedEarlyAccount
-                              .currentStartAge
-                          }
-                          세) 개시입니다. 가구 은퇴 시점으로 앞당겼을 때 당장
-                          공백과 이후 월액·잔액이 어떻게 바뀌는지 비교하세요.
-                        </>
-                      ) : (
-                        <>
-                          가구 은퇴보다 늦게 개시하는 등록 계좌가 없습니다. 신규
-                          상품 권유가 아니라 현재 자산의 인출 시점과 현금성 자산
-                          배치를 먼저 비교할 구간입니다.
-                        </>
-                      )}
-                    </p>
-                  </div>
-                  <div className="rounded-xl border border-blue-200 bg-white p-4">
-                    <p className="font-black text-blue-900">
-                      가구 은퇴 공백 전용 준비안
-                    </p>
-                    <p className="mt-2 text-sm leading-6 text-slate-700">
-                      {householdRetirement.monthlyContribution > 0 ? (
-                        <>
-                          지금부터 {householdRetirement.savingYears}년간 월{' '}
-                          <b>
-                            {money(householdRetirement.monthlyContribution)}
-                          </b>
-                          을 별도 준비하면, {householdRetirement.firstGapYear}
-                          년부터 {householdRetirement.payoutYears}년간 발생하는
-                          연도별 생활비 차이를 보완하는 보수적 안과 비교할 수
-                          있습니다.
-                        </>
-                      ) : (
-                        <>
-                          적립기간이 없으므로 약{' '}
-                          <b>{money(householdRetirement.requiredCapital)}</b>의
-                          기존 자산을 어느 시점에 사용할지 먼저 비교하세요.
-                        </>
-                      )}
-                    </p>
-                  </div>
-                </div>
-              </>
-            ) : (
-              <div className="mt-4 rounded-xl border border-emerald-200 bg-white p-4 text-sm font-bold text-emerald-800">
-                {householdRetirement.retirementYear}년 가구 은퇴 첫해의 예상
-                연금소득이 선택한 생활비 기준을 충족합니다. 이후 연금 종료
-                사건은 위 연도 탭에서 계속 확인하세요.
-              </div>
-            )}
+              ))}
+            </div>
+          ) : (
+            <p className="mt-4 rounded-lg border border-emerald-200 bg-white p-4 text-sm font-bold text-emerald-800">
+              현재 입력 가정에서는 마지막 생존 시점까지 생활비 부족구간이
+              없습니다.
+            </p>
+          )}
+          <div className="mt-4 grid gap-3 lg:grid-cols-2">
+            <div className="rounded-xl border border-blue-200 bg-white p-4">
+              <p className="font-black text-blue-950">
+                보유자산 반영 후 준비안
+              </p>
+              <p className="mt-2 text-sm leading-6 text-slate-700">
+                실제 부족액 현재가치 {money(cashflow.exactGapPresentValue)}에서
+                은퇴 활용 가능 자산{' '}
+                {money(cashflow.finance.retirementAvailableAssets)}을 차감하면
+                추가 필요재원은{' '}
+                <b>{money(cashflow.fundingNeedAfterAvailableAssets)}</b>입니다.
+                {cashflow.suggestedMonthlyContribution > 0 && (
+                  <>
+                    {' '}
+                    첫 부족연도 전까지 월{' '}
+                    <b>{money(cashflow.suggestedMonthlyContribution)}</b>{' '}
+                    적립안과 비교할 수 있습니다.
+                  </>
+                )}
+              </p>
+            </div>
+            <div className="rounded-xl border border-violet-200 bg-white p-4">
+              <p className="font-black text-violet-950">자본계획 포함 범위</p>
+              <p className="mt-2 text-sm leading-6 text-slate-700">
+                {includeLateLifeGap
+                  ? '마지막 생존자의 예상 사망연도까지 모든 부족구간을 필요재원에 포함했습니다.'
+                  : '첫 사망 이후의 후기 부족은 위험구간으로 표시하되 기본 필요재원에서는 분리했습니다.'}{' '}
+                첫 사망 이후 부족구간은 {cashflow.lateLifeGapPeriods.length}
+                개입니다.
+              </p>
+            </div>
+          </div>
+        </section>
+
+        {householdRetirementRow && householdRetirementYear && (
+          <section className="rounded-xl border border-orange-200 bg-orange-50/50 p-5">
+            <h3 className="text-lg font-black text-orange-950">
+              가구 은퇴 첫해 확인 · {householdRetirementYear}년 (본인{' '}
+              {householdRetirementRow.ageA}세
+              {householdRetirementRow.ageB == null
+                ? ''
+                : ` · 배우자 ${householdRetirementRow.ageB}세`}
+              )
+            </h3>
+            <p className="mt-2 text-sm leading-6 text-slate-700">
+              부채상환 후 가구 현금소득{' '}
+              <b>
+                {money(householdRetirementRow.householdCashIncomeAfterDebt)}
+              </b>{' '}
+              · 생활비 <b>{money(householdRetirementRow.livingCost)}</b> · 월{' '}
+              {householdRetirementRow.monthlyGap > 0
+                ? `${money(householdRetirementRow.monthlyGap)} 부족`
+                : `${money(householdRetirementRow.monthlySurplus)} 여유`}
+            </p>
+          </section>
+        )}
+
+        {result.afterFirstDeath && (
+          <section className="rounded-xl border border-violet-200 bg-violet-50/50 p-5">
+            <h3 className="text-lg font-black text-violet-950">
+              첫 사망 후 전환 · {result.afterFirstDeath.year}년
+            </h3>
+            <div className="mt-3 grid gap-3 md:grid-cols-3">
+              <Metric
+                label="생존자 국민연금 선택액"
+                value={money(result.afterFirstDeath.selectedNationalPension)}
+                note={result.afterFirstDeath.decisionText}
+              />
+              <Metric
+                label="생존자 개인·퇴직연금"
+                value={money(result.afterFirstDeath.additionalPrivatePension)}
+                note={`같은 해 기초연금 ${money(result.afterFirstDeath.basicPension)} 별도 합산`}
+              />
+              <Metric
+                label="전환연도 전체 연금소득"
+                value={money(result.afterFirstDeath.totalNetPension)}
+                note="국민연금 선택액 + 기초·기타 연금"
+              />
+            </div>
+          </section>
+        )}
+
+        {cashflow.warnings.length > 0 && (
+          <section className="grid gap-2">
+            {cashflow.warnings.map((warning) => (
+              <p
+                key={warning.code}
+                className={`rounded-lg border px-4 py-3 text-sm font-semibold leading-6 ${
+                  warning.severity === 'critical'
+                    ? 'border-rose-300 bg-rose-50 text-rose-950'
+                    : 'border-amber-300 bg-amber-50 text-amber-950'
+                }`}
+              >
+                <b>{warning.code}:</b> {warning.message}
+              </p>
+            ))}
           </section>
         )}
 
@@ -3791,29 +4167,39 @@ function LivingCostIncomeReport({
 
 function Report({
   result: sourceResult,
+  policy,
   netReturnRate,
   basicPension,
   livingCost,
+  householdFinance,
+  includeLateLifeGap,
 }: {
   result: SimulationResult;
+  policy: Policy;
   netReturnRate: number;
   basicPension: BasicPensionSettings;
   livingCost: LivingCostSettings;
+  householdFinance: HouseholdFinanceSettings;
+  includeLateLifeGap: boolean;
 }) {
   const result = useMemo(
-    () => addBasicPensionToResult(sourceResult, basicPension),
-    [basicPension, sourceResult],
+    () => addBasicPensionToResult(sourceResult, basicPension, policy),
+    [basicPension, policy, sourceResult],
   );
   const basicPensionMonthly = basicPensionBothAliveMonthly(
     sourceResult,
     basicPension,
+    policy,
   );
   return (
     <div className="grid gap-5 print-area">
       <LivingCostIncomeReport
         result={result}
+        policy={policy}
         netReturnRate={netReturnRate}
         livingCost={livingCost}
+        householdFinance={householdFinance}
+        includeLateLifeGap={includeLateLifeGap}
       />
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-7">
         <Metric
@@ -3837,9 +4223,15 @@ function Report({
           note="모든 등록 계좌 합계"
         />
         <Metric
-          label="예상 세후 월 합산"
+          label={
+            result.overallTaxEstimateStatus === 'complete'
+              ? '예상 세후 월 합산'
+              : result.overallTaxEstimateStatus === 'partial'
+                ? '세후 부분 추정 월 합산'
+                : '세금 미반영 항목 포함'
+          }
           value={money(result.estimatedBothAliveNetMonthly)}
-          note="사적연금 원천징수 참고"
+          note={`세금 추정 상태: ${result.overallTaxEstimateStatus}`}
         />
         <Metric
           label="첫 사망 후 월 합산"
@@ -4174,12 +4566,17 @@ export default function Home() {
         ...defaultLivingCostSettings(),
         ...saved.form.livingCost,
       },
+      householdFinance:
+        saved.form.householdFinance ?? defaultHouseholdFinanceSettings(),
     });
     setPolicy(validatePolicy(saved.policy));
   };
   const saveSession = async () => {
     try {
-      await saveEncryptedSession({ form, policy }, password);
+      await saveEncryptedSession(
+        { formSchemaVersion: '2.0', form, policy },
+        password,
+      );
       setSessionExists(true);
       setPassword('');
       setMessage(
@@ -4228,7 +4625,7 @@ export default function Home() {
         }
       }
       const profile = await createEncryptedProfileFile(
-        { form, policy },
+        { formSchemaVersion: '2.0', form, policy },
         encryptionPassword,
       );
       const content = JSON.stringify(profile, null, 2);
@@ -4266,8 +4663,7 @@ export default function Home() {
   };
   const exportAiAnalysisMarkdown = () => {
     try {
-      if (!result)
-        throw new Error('먼저 종합 보고서를 계산한 뒤 저장하세요.');
+      if (!result) throw new Error('먼저 종합 보고서를 계산한 뒤 저장하세요.');
       const content = buildAiAnalysisMarkdown({
         result,
         policy,
@@ -4275,6 +4671,8 @@ export default function Home() {
         basicPension: form.basicPension,
         livingCost: form.livingCost,
         plannerNetReturnRate: form.plannerNetReturnRate,
+        householdFinance: form.householdFinance,
+        includeLateLifeGap: form.includeLateLifeGap,
       });
       const blob = new Blob([content], {
         type: 'text/markdown;charset=utf-8',
@@ -4468,7 +4866,7 @@ export default function Home() {
         )}
         <HouseholdBasicInfo form={form} policy={policy} update={update} />
         <Tabs value={tab} onValueChange={setTab}>
-          <TabsList className="mb-7 grid min-h-16 w-full grid-cols-2 gap-2 rounded-xl border border-slate-200 bg-white p-2 shadow-sm md:grid-cols-4">
+          <TabsList className="mb-7 grid min-h-16 w-full grid-cols-2 gap-2 rounded-xl border border-slate-200 bg-white p-2 shadow-sm md:grid-cols-5">
             <TabsTrigger
               value="input"
               className="min-h-12 rounded-lg border border-blue-100 bg-blue-50 px-4 py-3 text-sm font-black text-blue-800 hover:bg-blue-100 data-active:border-blue-700 data-active:bg-blue-700 data-active:text-white"
@@ -4482,16 +4880,22 @@ export default function Home() {
               2. 개인·퇴직연금
             </TabsTrigger>
             <TabsTrigger
+              value="finance"
+              className="min-h-12 rounded-lg border border-cyan-100 bg-cyan-50 px-4 py-3 text-sm font-black text-cyan-900 hover:bg-cyan-100 data-active:border-cyan-700 data-active:bg-cyan-700 data-active:text-white"
+            >
+              3. 자산·부채·기타소득
+            </TabsTrigger>
+            <TabsTrigger
               value="report"
               className="min-h-12 rounded-lg border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm font-black text-emerald-800 hover:bg-emerald-100 data-active:border-emerald-700 data-active:bg-emerald-700 data-active:text-white"
             >
-              3. 전략·종합 보고서
+              4. 전략·종합 보고서
             </TabsTrigger>
             <TabsTrigger
               value="privacy"
               className="min-h-12 rounded-lg border border-amber-100 bg-amber-50 px-4 py-3 text-sm font-black text-amber-900 hover:bg-amber-100 data-active:border-amber-600 data-active:bg-amber-500 data-active:text-slate-950"
             >
-              4. 정책·보안 관리
+              5. 정책·보안 관리
             </TabsTrigger>
           </TabsList>
           <TabsContent value="input" className="grid gap-5">
@@ -4559,6 +4963,32 @@ export default function Home() {
               />
             </section>
             <AdditionalPensionGuide policy={policy} />
+            <div className="flex justify-end">
+              <Button size="lg" onClick={() => setTab('finance')}>
+                다음: 자산·부채·기타소득
+              </Button>
+            </div>
+          </TabsContent>
+          <TabsContent value="finance" className="grid gap-5">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-cyan-700">
+                은퇴 현금흐름 완성
+              </p>
+              <h1 className="mt-1 text-2xl font-bold">
+                자산·부채와 연금 외 반복소득을 입력하세요
+              </h1>
+              <p className="mt-2 text-sm leading-6 text-slate-600">
+                실거주 주택은 순자산에는 포함하지만 별도 매각 계획이 없으면 은퇴
+                생활비 재원으로 자동 사용하지 않습니다. 대출 상환정보가 비어
+                있으면 부족액 계산에 반영하지 못했다는 경고를 표시합니다.
+              </p>
+            </div>
+            <HouseholdFinanceControls
+              value={form.householdFinance}
+              onChange={(householdFinance) =>
+                setForm((prev) => ({ ...prev, householdFinance }))
+              }
+            />
             <div className="flex justify-end">
               <Button size="lg" onClick={() => setTab('report')}>
                 다음: 전략·종합 보고서
@@ -4634,6 +5064,10 @@ export default function Home() {
               setNetReturnRate={(plannerNetReturnRate) =>
                 setForm((prev) => ({ ...prev, plannerNetReturnRate }))
               }
+              includeLateLifeGap={form.includeLateLifeGap}
+              setIncludeLateLifeGap={(includeLateLifeGap) =>
+                setForm((prev) => ({ ...prev, includeLateLifeGap }))
+              }
             />
             <NpsInflationControls
               settings={form.npsInflation}
@@ -4663,6 +5097,7 @@ export default function Home() {
             />
             <PublicPensionAndLivingCostControls
               people={{ a: form.a, b: form.b }}
+              policy={policy}
               basicPension={form.basicPension}
               livingCost={form.livingCost}
               setBasicPension={(basicPension) =>
@@ -4675,9 +5110,12 @@ export default function Home() {
             {result ? (
               <Report
                 result={result}
+                policy={policy}
                 netReturnRate={form.plannerNetReturnRate}
                 basicPension={form.basicPension}
                 livingCost={form.livingCost}
+                householdFinance={form.householdFinance}
+                includeLateLifeGap={form.includeLateLifeGap}
               />
             ) : (
               <Card className="border-dashed">
