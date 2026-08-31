@@ -1,5 +1,6 @@
 'use client';
 
+import { useState } from 'react';
 import { Plus, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
@@ -27,8 +28,6 @@ import type {
 
 const currentYear = new Date().getFullYear();
 const moneyNumber = (value: string) => Number(value.replace(/\D/g, '')) || 0;
-const decimalNumber = (value: string) =>
-  Number(value.replace(/[^\d.-]/g, '')) || 0;
 
 const assetTypeLabels: Record<AssetType, string> = {
   cash: '현금·예금',
@@ -62,6 +61,58 @@ function MoneyField({
       value={value ? value.toLocaleString('ko-KR') : ''}
       placeholder="0"
       onChange={(event) => onChange(moneyNumber(event.target.value))}
+    />
+  );
+}
+
+function DecimalField({
+  value,
+  onChange,
+  placeholder = '0',
+}: {
+  value: number | undefined;
+  onChange: (value: number | undefined) => void;
+  placeholder?: string;
+}) {
+  const [draft, setDraft] = useState<string | null>(null);
+  const displayedValue = draft ?? (value == null ? '' : String(value));
+
+  const commit = (raw: string) => {
+    if (raw === '') {
+      onChange(undefined);
+      return;
+    }
+    if (raw === '-' || raw === '.' || raw === '-.' || raw.endsWith('.')) return;
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed)) onChange(parsed);
+  };
+
+  return (
+    <Input
+      type="text"
+      inputMode="decimal"
+      placeholder={placeholder}
+      value={displayedValue}
+      onChange={(event) => {
+        const raw = event.target.value.replace(',', '.');
+        if (!/^-?\d*(?:\.\d*)?$/.test(raw)) return;
+        setDraft(raw);
+        commit(raw);
+      }}
+      onBlur={() => {
+        if (
+          displayedValue === '' ||
+          displayedValue === '-' ||
+          displayedValue === '.' ||
+          displayedValue === '-.' ||
+          displayedValue.endsWith('.')
+        ) {
+          setDraft(null);
+          return;
+        }
+        commit(displayedValue);
+        setDraft(null);
+      }}
     />
   );
 }
@@ -293,17 +344,14 @@ export function HouseholdFinanceControls({
                       ] as const
                     ).map(([label, key]) => (
                       <Field key={key} label={label}>
-                        <Input
-                          inputMode="decimal"
+                        <DecimalField
                           placeholder="미입력"
-                          value={asset.rental?.[key] ?? ''}
-                          onChange={(event) =>
+                          value={asset.rental?.[key]}
+                          onChange={(nextValue) =>
                             patchAsset(asset.id, {
                               rental: {
                                 ...asset.rental!,
-                                [key]: event.target.value
-                                  ? decimalNumber(event.target.value)
-                                  : undefined,
+                                [key]: nextValue,
                               },
                             })
                           }
@@ -346,16 +394,13 @@ export function HouseholdFinanceControls({
                       />
                     </Field>
                     <Field label="매각 비용률(%)">
-                      <Input
-                        inputMode="decimal"
-                        value={asset.salePlan.sellingCostRate ?? 0}
-                        onChange={(event) =>
+                      <DecimalField
+                        value={asset.salePlan.sellingCostRate}
+                        onChange={(sellingCostRate) =>
                           patchAsset(asset.id, {
                             salePlan: {
                               ...asset.salePlan!,
-                              sellingCostRate: decimalNumber(
-                                event.target.value,
-                              ),
+                              sellingCostRate: sellingCostRate ?? 0,
                             },
                           })
                         }
@@ -477,15 +522,12 @@ export function HouseholdFinanceControls({
                   </Field>
                 ) : (
                   <Field label="연 금리(%)">
-                    <Input
-                      inputMode="decimal"
+                    <DecimalField
                       placeholder="미입력"
-                      value={debt.annualInterestRate ?? ''}
-                      onChange={(event) =>
+                      value={debt.annualInterestRate}
+                      onChange={(annualInterestRate) =>
                         patchDebt(debt.id, {
-                          annualInterestRate: event.target.value
-                            ? decimalNumber(event.target.value)
-                            : undefined,
+                          annualInterestRate,
                         })
                       }
                     />
@@ -603,27 +645,23 @@ export function HouseholdFinanceControls({
                 />
               </Field>
               <Field label="연 상승률(%)">
-                <Input
-                  inputMode="decimal"
-                  value={income.annualGrowthRate ?? 0}
-                  onChange={(event) =>
+                <DecimalField
+                  value={income.annualGrowthRate}
+                  onChange={(annualGrowthRate) =>
                     patchIncome(income.id, {
-                      annualGrowthRate: decimalNumber(event.target.value),
+                      annualGrowthRate: annualGrowthRate ?? 0,
                     })
                   }
                 />
               </Field>
               <div className="flex items-end gap-2">
                 <Field label="예상 세율(%)">
-                  <Input
-                    inputMode="decimal"
+                  <DecimalField
                     placeholder="미입력"
-                    value={income.estimatedTaxRate ?? ''}
-                    onChange={(event) =>
+                    value={income.estimatedTaxRate}
+                    onChange={(estimatedTaxRate) =>
                       patchIncome(income.id, {
-                        estimatedTaxRate: event.target.value
-                          ? decimalNumber(event.target.value)
-                          : undefined,
+                        estimatedTaxRate,
                       })
                     }
                   />
