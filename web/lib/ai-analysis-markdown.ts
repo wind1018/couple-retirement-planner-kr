@@ -13,6 +13,7 @@ import {
 import { buildIncomeTimelineEvents } from './income-timeline.ts';
 import {
   buildHouseholdCashflow,
+  resolveAssetUsePlan,
   type HouseholdCashflowAnalysis,
   type HouseholdFinanceSettings,
 } from './household-cashflow.ts';
@@ -87,7 +88,7 @@ function fundingLines(analysis: HouseholdCashflowAnalysis) {
   return [
     `- 첫 부족연도: ${analysis.firstGapYear ?? '없음'}`,
     `- 최대 월 부족액: ${money(analysis.maximumMonthlyGap)}`,
-    `- 실제 연도별 부족액 현재가치: ${money(analysis.exactGapPresentValue)}`,
+    `- 자산을 쓰지 않을 때 실제 연도별 부족액 현재가치: ${money(analysis.exactGapPresentValue)}`,
     `  - 기준연도: ${analysis.baseYear}년`,
     `  - 세후 할인율: 연 ${analysis.discountRate}%`,
     '  - 계산법: 연도별 실제 월 부족액 × 12를 기준연도로 할인한 합계',
@@ -95,7 +96,9 @@ function fundingLines(analysis: HouseholdCashflowAnalysis) {
     `  - 기준연도: ${analysis.baseYear}년`,
     `  - 세후 할인율: 연 ${analysis.discountRate}%`,
     '- 스트레스 값은 기본 필요재원이 아니라 보수적 상한 비교값',
-    `- 은퇴 활용 가능 자산 차감 후 추가 필요재원: ${money(analysis.fundingNeedAfterAvailableAssets)}`,
+    `- 계획에 따른 전체 자산 인출액: ${money(analysis.finance.plannedAssetWithdrawals)}`,
+    `- 자산 인출 후 남은 부족액 현재가치: ${money(analysis.exactGapPresentValueAfterAssets)}`,
+    `- 마지막 분석연도 남은 활용 예정 자산: ${money(analysis.finance.remainingPlannedAssetsAtEnd)}`,
     `- 첫 부족 전 월 적립 추정: ${money(analysis.suggestedMonthlyContribution)}`,
   ];
 }
@@ -132,7 +135,7 @@ export function buildAiAnalysisMarkdown({
   );
   const timelineRows = cashflow.rows.map(
     (row) =>
-      `| ${row.year} | ${cell(agePair(row.ageA, row.ageB))} | ${cell(eventByYear.get(row.year) ?? '')} | ${money(row.employmentIncome)} | ${money(row.nationalPension)} | ${money(row.basicPension)} | ${money(row.privatePension)} | ${money(row.rentalIncomeNet)} | ${money(row.otherIncome)} | ${money(row.debtService)} | ${money(row.livingCost)} | ${signedMoney(row.monthlySurplus, row.monthlyGap)} |`,
+      `| ${row.year} | ${cell(agePair(row.ageA, row.ageB))} | ${cell(eventByYear.get(row.year) ?? '')} | ${money(row.employmentIncome)} | ${money(row.nationalPension)} | ${money(row.basicPension)} | ${money(row.privatePension)} | ${money(row.rentalIncomeNet)} | ${money(row.otherIncome)} | ${money(row.debtService)} | ${money(row.assetWithdrawal)} | ${money(row.remainingRetirementAssets)} | ${money(row.livingCost)} | ${signedMoney(row.monthlySurplus, row.monthlyGap)} |`,
   );
   const additionalRows = result.additionalPensions.map((account) => {
     const contributionFrequency =
@@ -146,10 +149,16 @@ export function buildAiAnalysisMarkdown({
         : `${contributionFrequency} ${money(account.contributionAmount ?? 0)}, ${account.contributionEndAge ?? account.startAge}세까지`;
     return `| ${cell(account.ownerName)} | ${cell(pensionKindLabels[account.kind])} | ${cell(account.name)} | ${money(account.expectedBalance)} | ${cell(contribution)} | ${account.startYear}년 (${account.startAge}세) | ${account.payoutYears}년 | ${account.annualReturnRateBeforeStart ?? 0}% / ${account.annualReturnRate}% | ${account.annualFeeRate}% | ${account.projectedStartBalance == null ? '직접 월액 입력' : money(account.projectedStartBalance)} | ${money(account.firstYearEstimatedNetMonthly)} | ${account.taxEstimateStatus} |`;
   });
-  const assetRows = householdFinance.assets.map(
-    (asset) =>
-      `| ${cell(asset.name)} | ${asset.type} | ${money(asset.currentValue)} | ${asset.retirementLiquidity} | ${asset.salePlan?.enabled ? `${asset.salePlan.year}년` : '없음'} | ${asset.rental?.enabled ? money(asset.rental.grossMonthlyRent) : '없음'} |`,
-  );
+  const assetRows = householdFinance.assets.map((asset) => {
+    const plan = resolveAssetUsePlan(asset, currentYear);
+    const planLabel =
+      plan.mode === 'cover_gap'
+        ? '생활비 부족 자동 보충'
+        : plan.mode === 'fixed_monthly'
+          ? `매월 ${money(plan.monthlyAmount ?? 0)} 인출`
+          : '보유만 함';
+    return `| ${cell(asset.name)} | ${asset.type} | ${money(asset.currentValue)} | ${asset.retirementLiquidity} | ${asset.salePlan?.enabled ? `${asset.salePlan.year}년` : '없음'} | ${cell(`${planLabel}${plan.mode === 'hold' ? '' : ` · ${plan.startYear}년부터${plan.endYear == null ? '' : ` ${plan.endYear}년까지`} · 최소 ${money(plan.reserveAmount ?? 0)} 보유`}`)} | ${asset.rental?.enabled ? money(asset.rental.grossMonthlyRent) : '없음'} |`;
+  });
   const debtRows = householdFinance.debts.map(
     (debt) =>
       `| ${cell(debt.name)} | ${money(debt.principal)} | ${debt.repaymentType ?? '미입력'} | ${debt.annualInterestRate == null ? '미입력' : `${debt.annualInterestRate}%`} | ${debt.manualMonthlyPayment == null ? '자동/미입력' : money(debt.manualMonthlyPayment)} | ${debt.maturityYear ?? '미입력'} |`,
@@ -255,8 +264,8 @@ export function buildAiAnalysisMarkdown({
     '',
     ...(assetRows.length
       ? [
-          '| 이름 | 유형 | 현재가치 | 은퇴 유동성 | 매각계획 | 월 임대료 |',
-          '|---|---|---:|---|---|---:|',
+          '| 이름 | 유형 | 현재가치 | 은퇴 유동성 | 매각계획 | 생활비 사용계획 | 월 임대료 |',
+          '|---|---|---:|---|---|---|---:|',
           ...assetRows,
         ]
       : ['등록된 자산 없음']),
@@ -275,6 +284,8 @@ export function buildAiAnalysisMarkdown({
     `- 총부채: ${money(cashflow.finance.liabilities)}`,
     `- 순자산: ${money(cashflow.finance.netWorth)}`,
     `- 은퇴 활용 가능 자산: ${money(cashflow.finance.retirementAvailableAssets)}`,
+    `- 계획 기간 총 자산 인출액: ${money(cashflow.finance.plannedAssetWithdrawals)}`,
+    `- 마지막 분석연도 남은 활용 예정 자산: ${money(cashflow.finance.remainingPlannedAssetsAtEnd)}`,
     `- 실거주 주택 가치: ${money(cashflow.finance.primaryHomeValue)} (매각 계획이 없으면 은퇴재원에서 제외)`,
     '',
     '## 5. 기타 반복소득',
@@ -286,8 +297,8 @@ export function buildAiAnalysisMarkdown({
     '',
     '## 6. 연도별 가구 현금흐름',
     '',
-    '| 연도 | 당시 나이 | 주요 사건 | 근로 | 국민연금 | 기초연금 | 사적연금 | 임대순소득 | 기타 | 대출상환 | 생활비 | 순차이 |',
-    '|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|',
+    '| 연도 | 당시 나이 | 주요 사건 | 근로 | 국민연금 | 기초연금 | 사적연금 | 임대순소득 | 기타 | 대출상환 | 자산인출 | 남은 활용자산 | 생활비 | 순차이 |',
+    '|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|',
     ...timelineRows,
     '',
     '## 7. 부족구간',

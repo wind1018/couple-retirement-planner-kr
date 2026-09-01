@@ -105,6 +105,7 @@ import { buildAiAnalysisMarkdown } from '@/lib/ai-analysis-markdown';
 import {
   buildHouseholdCashflow,
   defaultHouseholdFinanceSettings,
+  resolveAssetUsePlan,
   type HouseholdCashflowRow,
   type HouseholdFinanceSettings,
 } from '@/lib/household-cashflow';
@@ -223,6 +224,9 @@ type CashflowChartPoint = {
   otherIncome: number;
   incomeBeforeDebt: number;
   debtService: number;
+  assetWithdrawal: number;
+  assetWithdrawalDetails: { assetId: string; name: string; amount: number }[];
+  remainingRetirementAssets: number;
   actual: number;
   essential: number;
   gap: number;
@@ -268,12 +272,26 @@ function CashflowChartTooltip({
           </span>
           <b className="text-rose-700">-{money(point.debtService)}</b>
         </div>
+        <div className="flex justify-between gap-4">
+          <span className="font-bold text-slate-700">③ 자산 인출</span>
+          <b className="text-violet-700">+{money(point.assetWithdrawal)}</b>
+        </div>
+        {point.assetWithdrawalDetails.length > 0 && (
+          <p className="pl-3 text-[11px] leading-5 text-violet-700">
+            {point.assetWithdrawalDetails
+              .map((detail) => `${detail.name} ${money(detail.amount)}`)
+              .join(' + ')}
+          </p>
+        )}
         <div className="flex justify-between gap-4 rounded-md bg-blue-50 px-2 py-1.5">
-          <span className="font-black text-blue-950">③ 생활비 전 순현금</span>
+          <span className="font-black text-blue-950">④ 생활비로 쓸 수 있는 현금</span>
           <b className="text-blue-700">{money(point.actual)}</b>
         </div>
+        <p className="pl-3 text-[11px] text-slate-500">
+          인출 후 남은 활용 예정 자산 {money(point.remainingRetirementAssets)}
+        </p>
         <div className="flex justify-between gap-4">
-          <span className="font-bold text-slate-700">④ {livingCostLegend}</span>
+          <span className="font-bold text-slate-700">⑤ {livingCostLegend}</span>
           <b className="text-orange-700">-{money(point.essential)}</b>
         </div>
         <div
@@ -281,7 +299,7 @@ function CashflowChartTooltip({
             balance < 0 ? 'text-rose-800' : 'text-emerald-800'
           }`}
         >
-          <span className="font-black">⑤ 생활비 후 최종 차이</span>
+          <span className="font-black">⑥ 생활비 후 최종 차이</span>
           <b>
             {balance < 0
               ? `-${money(Math.abs(balance))}`
@@ -2808,9 +2826,10 @@ function IncomeEventTimeline({
               나이별 월 가구 현금흐름과 생활비 차이
             </h4>
             <p className="mt-1 text-xs text-slate-500">
-              파란선은 각 연도의 근로·연금·임대·기타소득 합계에서 그해 매월 내는
-              대출 원리금을 뺀 금액입니다. 주황 점선은 생활비 기준, 붉은 영역은
-              해당 연도의 부족분입니다.
+              파란선은 총소득에서 그해 대출 원리금을 빼고, 등록한 계획에 따른 자산
+              인출액을 더해 실제 생활비로 쓸 수 있는 월 현금입니다. 보라 점선은
+              그해 월 자산인출액, 주황 점선은 생활비 기준, 붉은 영역은 자산까지
+              사용하고도 남는 부족분입니다.
             </p>
           </div>
           <Badge variant="outline">단위: 월 원</Badge>
@@ -2855,7 +2874,9 @@ function IncomeEventTimeline({
               <Legend
                 formatter={(value) =>
                   value === 'actual'
-                    ? '생활비 전 순현금(총소득 - 월 대출 원리금)'
+                    ? '생활비 사용 가능 현금(순소득 + 계획 자산인출)'
+                    : value === 'assetWithdrawal'
+                      ? '계획 자산인출액'
                     : value === 'essential'
                       ? livingCostLegend
                       : '생활비 기준 부족액'
@@ -2868,6 +2889,14 @@ function IncomeEventTimeline({
                 stroke="#ef4444"
                 fillOpacity={0.45}
                 strokeWidth={1.5}
+              />
+              <Line
+                type="stepAfter"
+                dataKey="assetWithdrawal"
+                stroke="#7c3aed"
+                strokeWidth={2}
+                strokeDasharray="4 4"
+                dot={false}
               />
               <Line
                 type="monotone"
@@ -2965,14 +2994,14 @@ function IncomeEventTimeline({
       </div>
       <div className="mt-3 grid gap-3 md:grid-cols-3">
         <Metric
-          label={`${visibleSelectedYear}년 월 가구소득(대출 원리금 차감)`}
+          label={`${visibleSelectedYear}년 생활비 사용 가능 현금`}
           value={money(
-            selectedCashflow?.householdCashIncomeAfterDebt ??
+            selectedCashflow?.householdCashAvailableAfterAsset ??
               selectedSnapshot.householdIncome,
           )}
           note={
             selectedCashflow
-              ? `근로 ${money(selectedCashflow.employmentIncome)} + 연금 ${money(selectedCashflow.nationalPension + selectedCashflow.basicPension + selectedCashflow.privatePension)} + 임대·기타 ${money(selectedCashflow.rentalIncomeNet + selectedCashflow.otherIncome)} - 부채상환 ${money(selectedCashflow.debtService)}`
+              ? `근로 ${money(selectedCashflow.employmentIncome)} + 연금 ${money(selectedCashflow.nationalPension + selectedCashflow.basicPension + selectedCashflow.privatePension)} + 임대·기타 ${money(selectedCashflow.rentalIncomeNet + selectedCashflow.otherIncome)} - 부채상환 ${money(selectedCashflow.debtService)} + 자산인출 ${money(selectedCashflow.assetWithdrawal)} · 인출 후 남은 활용자산 ${money(selectedCashflow.remainingRetirementAssets)}`
               : `근로 ${money(selectedSnapshot.employmentA + selectedSnapshot.employmentB)} + 연금 ${money(selectedSnapshot.pensionNetA + selectedSnapshot.pensionNetB)}`
           }
         />
@@ -3146,9 +3175,9 @@ function IncomeEventTimeline({
                       <br />
                       가구 합산{' '}
                       {money(
-                        (cashflow?.householdCashIncomeAfterDebt ??
+                        (cashflow?.householdCashAvailableAfterAsset ??
                           snapshot.householdIncome) -
-                          (previousCashflow?.householdCashIncomeAfterDebt ??
+                          (previousCashflow?.householdCashAvailableAfterAsset ??
                             previous.householdIncome),
                       )}
                       {cashflow && (
@@ -3160,6 +3189,8 @@ function IncomeEventTimeline({
                           )}
                           <br />
                           월 부채상환 -{money(cashflow.debtService)}
+                          <br />
+                          월 자산인출 +{money(cashflow.assetWithdrawal)}
                         </>
                       )}
                     </p>
@@ -3168,9 +3199,9 @@ function IncomeEventTimeline({
                 <p className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
                   {group.year}년 생활비{' '}
                   {money(cashflow?.livingCost ?? snapshot.livingCost)} 대비 그해
-                  월 대출상환액을 차감한 예상 가구소득{' '}
+                  월 부채상환을 빼고 계획한 자산인출을 더한 생활비 사용 가능 현금{' '}
                   {money(
-                    cashflow?.householdCashIncomeAfterDebt ??
+                    cashflow?.householdCashAvailableAfterAsset ??
                       snapshot.householdIncome,
                   )}
                   로, 월{' '}
@@ -3928,7 +3959,10 @@ function LivingCostIncomeReport({
         otherIncome: row.otherIncome,
         incomeBeforeDebt: row.householdIncomeBeforeDebt,
         debtService: row.debtService,
-        actual: row.householdCashIncomeAfterDebt,
+        assetWithdrawal: row.assetWithdrawal,
+        assetWithdrawalDetails: row.assetWithdrawalDetails,
+        remainingRetirementAssets: row.remainingRetirementAssets,
+        actual: row.householdCashAvailableAfterAsset,
         essential: row.livingCost,
         gap: row.monthlyGap,
         surplus: row.monthlySurplus,
@@ -4018,10 +4052,10 @@ function LivingCostIncomeReport({
             <Metric
               label="은퇴 활용 가능 자산"
               value={money(cashflow.finance.retirementAvailableAssets)}
-              note="유동·현금화 가능으로 지정한 자산만"
+              note="생활비 사용 계획과 현금화 시점이 지정된 현재 자산가치"
             />
           </div>
-          <div className="mt-3 grid gap-3 md:grid-cols-3">
+          <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
             <Metric
               label="기준연도 임대 순수입"
               value={money(cashflow.finance.monthlyRentalIncomeNetAtBaseYear)}
@@ -4048,7 +4082,82 @@ function LivingCostIncomeReport({
                   : 'danger'
               }
             />
+            <Metric
+              label="계획 기간 총 자산인출"
+              value={money(cashflow.finance.plannedAssetWithdrawals)}
+              note="매각·운용수익을 반영해 연도별 생활비에 실제 투입한 합계"
+            />
+            <Metric
+              label="마지막 분석연도 남은 활용자산"
+              value={money(cashflow.finance.remainingPlannedAssetsAtEnd)}
+              note="보유만 하기로 한 자산은 제외"
+            />
           </div>
+          {householdFinance.assets.length > 0 && (
+            <div className="mt-4 rounded-xl border border-violet-200 bg-violet-50/60 p-4">
+              <h4 className="font-black text-violet-950">
+                자산별 생활비 사용계획
+              </h4>
+              <p className="mt-1 text-xs leading-5 text-violet-800">
+                자산가치를 한꺼번에 부족재원에서 빼지 않고, 아래 시점과 방식대로
+                해당 연도의 현금흐름에 넣습니다.
+              </p>
+              <div className="mt-3 grid gap-2 lg:grid-cols-2">
+                {householdFinance.assets.map((asset) => {
+                  const plan = resolveAssetUsePlan(asset, currentYear);
+                  const drawRows = cashflow.rows.filter((row) =>
+                    row.assetWithdrawalDetails.some(
+                      (detail) => detail.assetId === asset.id,
+                    ),
+                  );
+                  const totalDraw = drawRows.reduce(
+                    (sum, row) =>
+                      sum +
+                      (row.assetWithdrawalDetails.find(
+                        (detail) => detail.assetId === asset.id,
+                      )?.amount ?? 0) *
+                        12,
+                    0,
+                  );
+                  const modeText =
+                    plan.mode === 'cover_gap'
+                      ? '생활비가 부족한 해에 필요한 금액만 인출'
+                      : plan.mode === 'fixed_monthly'
+                        ? `매월 ${money(plan.monthlyAmount ?? 0)} 인출`
+                        : '생활비 현금흐름에는 사용하지 않고 보유';
+                  return (
+                    <div
+                      key={asset.id}
+                      className="rounded-lg border border-violet-100 bg-white px-3 py-2 text-xs leading-5 text-slate-700"
+                    >
+                      <p className="font-black text-slate-950">{asset.name}</p>
+                      <p>{modeText}</p>
+                      {plan.mode !== 'hold' && (
+                        <p>
+                          설정 기간 {plan.startYear}년
+                          {plan.endYear == null ? '부터' : `~${plan.endYear}년`} · 최소{' '}
+                          {money(plan.reserveAmount ?? 0)} 유지
+                        </p>
+                      )}
+                      {asset.salePlan?.enabled && (
+                        <p>
+                          {asset.salePlan.year}년 매각 후 비용·세금 차감액부터 사용
+                        </p>
+                      )}
+                      {plan.mode !== 'hold' && (
+                        <p className="mt-1 font-bold text-violet-800">
+                          계산 결과:{' '}
+                          {drawRows.length
+                            ? `${drawRows[0].year}년부터 총 ${money(totalDraw)} 인출`
+                            : '인출 가능한 시점 또는 생활비 부족이 없어 실제 인출 0원'}
+                        </p>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
         </section>
 
         <section className="rounded-xl border-2 border-amber-200 bg-amber-50/50 p-5">
@@ -4090,9 +4199,9 @@ function LivingCostIncomeReport({
               tone={cashflow.maximumMonthlyGap > 0 ? 'danger' : 'default'}
             />
             <Metric
-              label="실제 부족액 흐름 현재가치"
+              label="자산 사용 전 부족액 현재가치"
               value={money(cashflow.exactGapPresentValue)}
-              note={`${cashflow.baseYear}년 가치 · 연도별 실제 부족액 할인합계`}
+              note={`${cashflow.baseYear}년 가치 · 연금·소득만으로 계산`}
             />
             <Metric
               label="스트레스 필요재원 상한"
@@ -4140,14 +4249,17 @@ function LivingCostIncomeReport({
           <div className="mt-4 grid gap-3 lg:grid-cols-2">
             <div className="rounded-xl border border-blue-200 bg-white p-4">
               <p className="font-black text-blue-950">
-                보유자산 반영 후 준비안
+                자산 사용 계획 반영 결과
               </p>
               <p className="mt-2 text-sm leading-6 text-slate-700">
-                실제 부족액 현재가치 {money(cashflow.exactGapPresentValue)}에서
-                은퇴 활용 가능 자산{' '}
-                {money(cashflow.finance.retirementAvailableAssets)}을 차감하면
-                추가 필요재원은{' '}
-                <b>{money(cashflow.fundingNeedAfterAvailableAssets)}</b>입니다.
+                자산을 쓰지 않을 때 부족액 현재가치는{' '}
+                {money(cashflow.exactGapPresentValue)}입니다. 등록한 시작연도·매각
+                시점·인출방식에 따라 총{' '}
+                <b>{money(cashflow.finance.plannedAssetWithdrawals)}</b>을 생활비에
+                투입한 뒤에도 남는 부족액 현재가치는{' '}
+                <b>{money(cashflow.exactGapPresentValueAfterAssets)}</b>입니다. 마지막
+                분석연도에 남는 활용 예정 자산은{' '}
+                {money(cashflow.finance.remainingPlannedAssetsAtEnd)}입니다.
                 {cashflow.suggestedMonthlyContribution > 0 && (
                   <>
                     {' '}
@@ -4182,11 +4294,13 @@ function LivingCostIncomeReport({
               )
             </h3>
             <p className="mt-2 text-sm leading-6 text-slate-700">
-              {householdRetirementYear}년 월 대출상환액을 차감한 가구소득{' '}
+              {householdRetirementYear}년 월 부채상환을 빼고 자산인출을 더한 생활비
+              사용 가능 현금{' '}
               <b>
-                {money(householdRetirementRow.householdCashIncomeAfterDebt)}
+                {money(householdRetirementRow.householdCashAvailableAfterAsset)}
               </b>{' '}
-              · 생활비 <b>{money(householdRetirementRow.livingCost)}</b> · 월{' '}
+              (자산인출 +{money(householdRetirementRow.assetWithdrawal)}) · 생활비{' '}
+              <b>{money(householdRetirementRow.livingCost)}</b> · 월{' '}
               {householdRetirementRow.monthlyGap > 0
                 ? `${money(householdRetirementRow.monthlyGap)} 부족`
                 : `${money(householdRetirementRow.monthlySurplus)} 여유`}

@@ -16,8 +16,10 @@ import {
   NativeSelect,
   NativeSelectOption,
 } from '@/components/ui/native-select';
+import { resolveAssetUsePlan } from '@/lib/household-cashflow';
 import type {
   AssetType,
+  AssetUseMode,
   DebtRepaymentType,
   HouseholdAsset,
   HouseholdDebt,
@@ -40,9 +42,14 @@ const assetTypeLabels: Record<AssetType, string> = {
 };
 const liquidityLabels: Record<RetirementLiquidity, string> = {
   liquid: '즉시 활용 가능',
-  sellable: '현금화 가능',
-  illiquid: '비유동 자산',
+  sellable: '매각하면 활용 가능',
+  illiquid: '당장 현금화 어려움',
   exclude: '은퇴재원에서 제외',
+};
+const assetUseModeLabels: Record<AssetUseMode, string> = {
+  cover_gap: '생활비 부족분 자동 충당',
+  fixed_monthly: '매월 정액 인출',
+  hold: '보유만 함 · 현금흐름 미사용',
 };
 
 function MoneyField({
@@ -167,6 +174,11 @@ export function HouseholdFinanceControls({
       type: 'cash',
       currentValue: 0,
       retirementLiquidity: 'liquid',
+      retirementUse: {
+        mode: 'cover_gap',
+        startYear: currentYear,
+        reserveAmount: 0,
+      },
     };
     onChange({ ...value, assets: [...value.assets, asset] });
   };
@@ -219,6 +231,7 @@ export function HouseholdFinanceControls({
           {value.assets.map((asset) => {
             const rentalEnabled = Boolean(asset.rental?.enabled);
             const saleEnabled = Boolean(asset.salePlan?.enabled);
+            const usePlan = resolveAssetUsePlan(asset, currentYear);
             return (
               <section
                 key={asset.id}
@@ -236,6 +249,10 @@ export function HouseholdFinanceControls({
                             type === 'primary_home'
                               ? 'exclude'
                               : asset.retirementLiquidity,
+                          retirementUse:
+                            type === 'primary_home'
+                              ? { ...usePlan, mode: 'hold' }
+                              : usePlan,
                         });
                       }}
                     >
@@ -262,7 +279,7 @@ export function HouseholdFinanceControls({
                       }
                     />
                   </Field>
-                  <Field label="은퇴재원 활용">
+                  <Field label="현재 현금화 상태">
                     <NativeSelect
                       value={asset.retirementLiquidity}
                       onChange={(event) =>
@@ -279,6 +296,98 @@ export function HouseholdFinanceControls({
                       ))}
                     </NativeSelect>
                   </Field>
+                </div>
+                <div className="mt-4 rounded-lg border border-blue-200 bg-blue-50/70 p-3">
+                  <p className="mb-3 text-xs font-bold text-blue-900">
+                    이 자산을 은퇴 생활비에 어떻게 사용할지 정하세요. 자동 충당은
+                    생활비가 부족한 연도에만 필요한 만큼 인출합니다.
+                  </p>
+                  <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+                    <Field label="생활비 활용 방식">
+                      <NativeSelect
+                        value={usePlan.mode}
+                        onChange={(event) =>
+                          patchAsset(asset.id, {
+                            retirementUse: {
+                              ...usePlan,
+                              mode: event.target.value as AssetUseMode,
+                            },
+                          })
+                        }
+                      >
+                        {Object.entries(assetUseModeLabels).map(([key, label]) => (
+                          <NativeSelectOption key={key} value={key}>
+                            {label}
+                          </NativeSelectOption>
+                        ))}
+                      </NativeSelect>
+                    </Field>
+                    {usePlan.mode !== 'hold' && (
+                      <>
+                        <Field label="활용 시작연도">
+                          <Input
+                            inputMode="numeric"
+                            value={usePlan.startYear}
+                            onChange={(event) =>
+                              patchAsset(asset.id, {
+                                retirementUse: {
+                                  ...usePlan,
+                                  startYear: moneyNumber(event.target.value),
+                                },
+                              })
+                            }
+                          />
+                        </Field>
+                        <Field label="활용 종료연도(선택)">
+                          <Input
+                            inputMode="numeric"
+                            value={usePlan.endYear ?? ''}
+                            placeholder="마지막 분석연도까지"
+                            onChange={(event) =>
+                              patchAsset(asset.id, {
+                                retirementUse: {
+                                  ...usePlan,
+                                  endYear: event.target.value
+                                    ? moneyNumber(event.target.value)
+                                    : undefined,
+                                },
+                              })
+                            }
+                          />
+                        </Field>
+                        {usePlan.mode === 'fixed_monthly' && (
+                          <Field label="매월 인출액">
+                            <MoneyField
+                              value={usePlan.monthlyAmount ?? 0}
+                              onChange={(monthlyAmount) =>
+                                patchAsset(asset.id, {
+                                  retirementUse: { ...usePlan, monthlyAmount },
+                                })
+                              }
+                            />
+                          </Field>
+                        )}
+                        <Field label="남겨둘 최소 잔액">
+                          <MoneyField
+                            value={usePlan.reserveAmount ?? 0}
+                            onChange={(reserveAmount) =>
+                              patchAsset(asset.id, {
+                                retirementUse: { ...usePlan, reserveAmount },
+                              })
+                            }
+                          />
+                        </Field>
+                      </>
+                    )}
+                  </div>
+                  {usePlan.mode !== 'hold' &&
+                    asset.retirementLiquidity !== 'liquid' &&
+                    !saleEnabled && (
+                      <p className="mt-2 text-xs font-bold text-amber-800">
+                        현금화 가능한 연도가 없으므로 아직 인출되지 않습니다. 아래
+                        ‘매각·현금화 계획’을 켜고 연도를 입력하세요.
+                      </p>
+                    )}
                 </div>
                 <div className="mt-4 flex flex-wrap gap-5 border-t border-emerald-100 pt-4">
                   <label className="flex items-center gap-2 text-sm font-bold">
@@ -309,6 +418,9 @@ export function HouseholdFinanceControls({
                       checked={saleEnabled}
                       onCheckedChange={(checked) =>
                         patchAsset(asset.id, {
+                          retirementLiquidity: checked
+                            ? 'sellable'
+                            : asset.retirementLiquidity,
                           salePlan: {
                             enabled: Boolean(checked),
                             year: asset.salePlan?.year ?? currentYear + 10,
@@ -317,6 +429,19 @@ export function HouseholdFinanceControls({
                             capitalGainsTaxEstimate:
                               asset.salePlan?.capitalGainsTaxEstimate ?? 0,
                           },
+                          retirementUse: checked
+                            ? {
+                                ...usePlan,
+                                mode:
+                                  usePlan.mode === 'hold'
+                                    ? 'cover_gap'
+                                    : usePlan.mode,
+                                startYear:
+                                  asset.salePlan?.year ?? currentYear + 10,
+                              }
+                            : asset.retirementLiquidity === 'liquid'
+                              ? usePlan
+                              : { ...usePlan, mode: 'hold' },
                         })
                       }
                     />
@@ -383,14 +508,16 @@ export function HouseholdFinanceControls({
                       <Input
                         inputMode="numeric"
                         value={asset.salePlan.year}
-                        onChange={(event) =>
+                        onChange={(event) => {
+                          const year = moneyNumber(event.target.value);
                           patchAsset(asset.id, {
                             salePlan: {
                               ...asset.salePlan!,
-                              year: moneyNumber(event.target.value),
+                              year,
                             },
-                          })
-                        }
+                            retirementUse: { ...usePlan, startYear: year },
+                          });
+                        }}
                       />
                     </Field>
                     <Field label="매각 비용률(%)">

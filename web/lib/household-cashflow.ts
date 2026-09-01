@@ -18,6 +18,14 @@ export type RetirementLiquidity =
   | 'sellable'
   | 'illiquid'
   | 'exclude';
+export type AssetUseMode = 'cover_gap' | 'fixed_monthly' | 'hold';
+export type AssetUsePlan = {
+  mode: AssetUseMode;
+  startYear: number;
+  endYear?: number | null;
+  monthlyAmount?: number;
+  reserveAmount?: number;
+};
 export type DebtRepaymentType =
   | 'interest_only'
   | 'amortizing'
@@ -37,6 +45,7 @@ export type HouseholdAsset = {
   currentValue: number;
   retirementLiquidity: RetirementLiquidity;
   annualAppreciationRate?: number;
+  retirementUse?: AssetUsePlan;
   salePlan?: {
     enabled: boolean;
     year: number;
@@ -106,6 +115,11 @@ export type HouseholdCashflowRow = {
   debtService: number;
   householdIncomeBeforeDebt: number;
   householdCashIncomeAfterDebt: number;
+  monthlyGapBeforeAsset: number;
+  assetWithdrawal: number;
+  assetWithdrawalDetails: { assetId: string; name: string; amount: number }[];
+  householdCashAvailableAfterAsset: number;
+  remainingRetirementAssets: number;
   livingCost: number;
   monthlyGap: number;
   monthlySurplus: number;
@@ -125,6 +139,8 @@ export type HouseholdFinanceSummary = {
   liabilities: number;
   netWorth: number;
   retirementAvailableAssets: number;
+  plannedAssetWithdrawals: number;
+  remainingPlannedAssetsAtEnd: number;
   primaryHomeValue: number;
   monthlyRentalIncomeGrossAtBaseYear: number;
   monthlyRentalIncomeNetAtBaseYear: number;
@@ -141,12 +157,14 @@ export type HouseholdCashflowAnalysis = {
   baseYear: number;
   discountRate: number;
   rows: HouseholdCashflowRow[];
+  gapPeriodsBeforeAssets: GapPeriod[];
   gapPeriods: GapPeriod[];
   capitalPlanGapPeriods: GapPeriod[];
   lateLifeGapPeriods: GapPeriod[];
   firstGapYear: number | null;
   maximumMonthlyGap: number;
   exactGapPresentValue: number;
+  exactGapPresentValueAfterAssets: number;
   conservativeStressCapital: number;
   fundingNeedAfterAvailableAssets: number;
   suggestedMonthlyContribution: number;
@@ -188,7 +206,11 @@ function rentalIncomeAtYear(
   const rental = asset.rental;
   if (!rental?.enabled) return { gross: 0, net: 0, partial: false };
   const startYear = rental.startYear ?? baseYear;
-  if (year < startYear || (rental.endYear != null && year > rental.endYear))
+  if (
+    year < startYear ||
+    (rental.endYear != null && year > rental.endYear) ||
+    (asset.salePlan?.enabled && year >= asset.salePlan.year)
+  )
     return { gross: 0, net: 0, partial: false };
   const gross =
     Math.max(0, rental.grossMonthlyRent) *
@@ -344,22 +366,144 @@ export function buildGapPeriods(
   return periods;
 }
 
-function availableAssetValue(asset: HouseholdAsset) {
+function availableAssetValue(asset: HouseholdAsset, currentYear: number) {
   if (asset.currentValue <= 0) return 0;
-  if (asset.type === 'primary_home' && !asset.salePlan?.enabled) return 0;
-  if (asset.retirementLiquidity === 'liquid') return asset.currentValue;
-  if (
-    asset.retirementLiquidity === 'sellable' &&
-    (asset.type !== 'primary_home' || asset.salePlan?.enabled)
-  ) {
+  const plan = resolveAssetUsePlan(asset, currentYear);
+  if (plan.mode === 'hold') return 0;
+  const reserve = Math.max(0, plan.reserveAmount ?? 0);
+  if (asset.retirementLiquidity === 'liquid')
+    return Math.max(0, asset.currentValue - reserve);
+  if (asset.salePlan?.enabled) {
     const sellingCost = clampRate(asset.salePlan?.sellingCostRate);
     return Math.max(
       0,
       asset.currentValue * (1 - sellingCost) -
-        (asset.salePlan?.capitalGainsTaxEstimate ?? 0),
+        (asset.salePlan?.capitalGainsTaxEstimate ?? 0) -
+        reserve,
     );
   }
   return 0;
+}
+
+export function resolveAssetUsePlan(
+  asset: HouseholdAsset,
+  currentYear = new Date().getFullYear(),
+): AssetUsePlan {
+  if (asset.retirementUse) return asset.retirementUse;
+  if (asset.retirementLiquidity === 'liquid')
+    return { mode: 'cover_gap', startYear: currentYear, reserveAmount: 0 };
+  if (asset.salePlan?.enabled)
+    return {
+      mode: 'cover_gap',
+      startYear: asset.salePlan.year,
+      reserveAmount: 0,
+    };
+  return { mode: 'hold', startYear: currentYear, reserveAmount: 0 };
+}
+
+const signedAnnualRate = (value: number | undefined) =>
+  Math.min(100, Math.max(-100, value ?? 0)) / 100;
+
+function applyAssetUsePlans(
+  baseRows: HouseholdCashflowRow[],
+  assets: HouseholdAsset[],
+  currentYear: number,
+) {
+  const states = assets.map((asset) => ({
+    asset,
+    plan: resolveAssetUsePlan(asset, currentYear),
+    balance: Math.max(0, asset.currentValue),
+    sold: false,
+  }));
+  let totalWithdrawals = 0;
+  const rows = baseRows.map((baseRow, rowIndex): HouseholdCashflowRow => {
+    const year = baseRow.year;
+    if (rowIndex > 0) {
+      for (const state of states)
+        if (!state.sold)
+          state.balance *=
+            1 + signedAnnualRate(state.asset.annualAppreciationRate);
+    }
+    for (const state of states) {
+      const sale = state.asset.salePlan;
+      if (sale?.enabled && !state.sold && year >= sale.year) {
+        state.balance = Math.max(
+          0,
+          state.balance * (1 - clampRate(sale.sellingCostRate)) -
+            (sale.capitalGainsTaxEstimate ?? 0),
+        );
+        state.sold = true;
+      }
+    }
+
+    let annualWithdrawal = 0;
+    const details: HouseholdCashflowRow['assetWithdrawalDetails'] = [];
+    const drawFrom = (state: (typeof states)[number], requestedAnnual: number) => {
+      const reserve = Math.max(0, state.plan.reserveAmount ?? 0);
+      const drawable = Math.max(0, state.balance - reserve);
+      const amount = Math.min(drawable, Math.max(0, requestedAnnual));
+      if (amount <= 0) return;
+      state.balance -= amount;
+      annualWithdrawal += amount;
+      details.push({
+        assetId: state.asset.id,
+        name: state.asset.name,
+        amount: round(amount / 12),
+      });
+    };
+
+    for (const state of states) {
+      const { asset, plan } = state;
+      if (
+        plan.mode === 'hold' ||
+        year < plan.startYear ||
+        (plan.endYear != null && year > plan.endYear)
+      )
+        continue;
+      const convertedToCash =
+        asset.retirementLiquidity === 'liquid' || state.sold;
+      if (!convertedToCash) continue;
+      if (plan.mode === 'fixed_monthly')
+        drawFrom(state, Math.max(0, plan.monthlyAmount ?? 0) * 12);
+      if (plan.mode === 'cover_gap') {
+        const cashIncludingPriorDraws =
+          baseRow.householdCashIncomeAfterDebt + annualWithdrawal / 12;
+        const remainingMonthlyGap = Math.max(
+          0,
+          baseRow.livingCost - cashIncludingPriorDraws,
+        );
+        drawFrom(state, remainingMonthlyGap * 12);
+      }
+    }
+
+    const assetWithdrawal = round(annualWithdrawal / 12);
+    totalWithdrawals += annualWithdrawal;
+    const householdCashAvailableAfterAsset =
+      baseRow.householdCashIncomeAfterDebt + assetWithdrawal;
+    const remainingRetirementAssets = round(
+      states
+        .filter((state) => state.plan.mode !== 'hold')
+        .reduce((sum, state) => sum + state.balance, 0),
+    );
+    return {
+      ...baseRow,
+      assetWithdrawal,
+      assetWithdrawalDetails: details,
+      householdCashAvailableAfterAsset: round(householdCashAvailableAfterAsset),
+      remainingRetirementAssets,
+      monthlyGap: round(
+        Math.max(0, baseRow.livingCost - householdCashAvailableAfterAsset),
+      ),
+      monthlySurplus: round(
+        Math.max(0, householdCashAvailableAfterAsset - baseRow.livingCost),
+      ),
+    };
+  });
+  return {
+    rows,
+    totalWithdrawals: round(totalWithdrawals),
+    remainingAssets: rows.at(-1)?.remainingRetirementAssets ?? 0,
+  };
 }
 
 function monthlyContributionForPresentValue(
@@ -407,7 +551,7 @@ export function buildHouseholdCashflow({
   let anyRentalPartial = false;
   let anyOtherIncomePartial = false;
   let anyDebtIncomplete = false;
-  const rows = Array.from(
+  const baseRows = Array.from(
     { length: Math.max(0, lastDeathYear - currentYear + 1) },
     (_, index): HouseholdCashflowRow => {
       const year = currentYear + index;
@@ -497,6 +641,13 @@ export function buildHouseholdCashflow({
         debtService: round(debtService),
         householdIncomeBeforeDebt: round(householdIncomeBeforeDebt),
         householdCashIncomeAfterDebt: round(householdCashIncomeAfterDebt),
+        monthlyGapBeforeAsset: round(
+          Math.max(0, livingCostAmount - householdCashIncomeAfterDebt),
+        ),
+        assetWithdrawal: 0,
+        assetWithdrawalDetails: [],
+        householdCashAvailableAfterAsset: round(householdCashIncomeAfterDebt),
+        remainingRetirementAssets: 0,
         livingCost: livingCostAmount,
         monthlyGap: round(
           Math.max(0, livingCostAmount - householdCashIncomeAfterDebt),
@@ -508,10 +659,20 @@ export function buildHouseholdCashflow({
       };
     },
   );
+  const assetUse = applyAssetUsePlans(baseRows, finance.assets, currentYear);
+  const rows = assetUse.rows;
+  const gapPeriodsBeforeAssets = buildGapPeriods(
+    baseRows,
+    currentYear,
+    annualNetReturnRate,
+  );
   const gapPeriods = buildGapPeriods(rows, currentYear, annualNetReturnRate);
   const capitalPlanRows = includeLateLifeGap
     ? rows
     : rows.filter((row) => row.year <= firstDeathYear);
+  const baseCapitalPlanRows = includeLateLifeGap
+    ? baseRows
+    : baseRows.filter((row) => row.year <= firstDeathYear);
   const capitalPlanGapPeriods = buildGapPeriods(
     capitalPlanRows,
     currentYear,
@@ -521,7 +682,18 @@ export function buildHouseholdCashflow({
     (period) => period.phase === 'survivor',
   );
   const gapRows = capitalPlanRows.filter((row) => row.monthlyGap > 0);
+  const gapRowsBeforeAssets = baseCapitalPlanRows.filter(
+    (row) => row.monthlyGapBeforeAsset > 0,
+  );
   const exactGapPresentValue = calculateGapPresentValue(
+    gapRowsBeforeAssets.map((row) => ({
+      ...row,
+      monthlyGap: row.monthlyGapBeforeAsset,
+    })),
+    currentYear,
+    annualNetReturnRate,
+  );
+  const exactGapPresentValueAfterAssets = calculateGapPresentValue(
     gapRows,
     currentYear,
     annualNetReturnRate,
@@ -552,7 +724,10 @@ export function buildHouseholdCashflow({
     0,
   );
   const retirementAvailableAssets = round(
-    finance.assets.reduce((sum, asset) => sum + availableAssetValue(asset), 0),
+    finance.assets.reduce(
+      (sum, asset) => sum + availableAssetValue(asset, currentYear),
+      0,
+    ),
   );
   const baseRow = rows[0];
   const taxEstimateIncomplete = result.additionalPensions.some(
@@ -563,6 +738,8 @@ export function buildHouseholdCashflow({
     liabilities: round(liabilities),
     netWorth: round(grossAssets - liabilities),
     retirementAvailableAssets,
+    plannedAssetWithdrawals: assetUse.totalWithdrawals,
+    remainingPlannedAssetsAtEnd: assetUse.remainingAssets,
     primaryHomeValue: round(
       finance.assets
         .filter((asset) => asset.type === 'primary_home')
@@ -580,7 +757,7 @@ export function buildHouseholdCashflow({
     },
   };
   const fundingNeedAfterAvailableAssets = round(
-    Math.max(0, exactGapPresentValue - retirementAvailableAssets),
+    exactGapPresentValueAfterAssets,
   );
   const monthsUntilFirstGap =
     firstGapYear == null ? 0 : Math.max(0, firstGapYear - currentYear) * 12;
@@ -617,16 +794,33 @@ export function buildHouseholdCashflow({
         '일부 개인·퇴직연금의 세금 입력이 없어 전체 금액은 세후 확정액이 아닌 부분 추정입니다.',
       affectedMetric: 'householdCashIncomeAfterDebt',
     });
+  const unavailablePlannedAssets = finance.assets.filter((asset) => {
+    const plan = resolveAssetUsePlan(asset, currentYear);
+    return (
+      plan.mode !== 'hold' &&
+      asset.retirementLiquidity !== 'liquid' &&
+      !asset.salePlan?.enabled
+    );
+  });
+  if (unavailablePlannedAssets.length)
+    warnings.push({
+      code: 'ASSET_USE_NOT_CONVERTIBLE',
+      severity: 'warning',
+      message: `${unavailablePlannedAssets.map((asset) => asset.name).join(', ')}은(는) 생활비에 사용하도록 설정됐지만 현금성 자산도 아니고 매각 계획도 없어 연도별 인출액에 반영되지 않았습니다.`,
+      affectedMetric: 'assetWithdrawal',
+    });
   return {
     baseYear: currentYear,
     discountRate: annualNetReturnRate,
     rows,
+    gapPeriodsBeforeAssets,
     gapPeriods,
     capitalPlanGapPeriods,
     lateLifeGapPeriods,
     firstGapYear,
     maximumMonthlyGap: round(maximumMonthlyGap),
     exactGapPresentValue,
+    exactGapPresentValueAfterAssets,
     conservativeStressCapital,
     fundingNeedAfterAvailableAssets,
     suggestedMonthlyContribution: round(

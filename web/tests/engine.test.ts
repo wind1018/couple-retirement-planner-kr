@@ -768,11 +768,131 @@ void test('부분은퇴부터 부족을 찾고 여러 부족구간과 실제 PV�
   assert.ok(analysis.gapPeriods.length >= 2);
   assert.ok(analysis.exactGapPresentValue < analysis.conservativeStressCapital);
   assert.equal(analysis.finance.primaryHomeValue, 2_800_000_000);
-  assert.equal(analysis.finance.retirementAvailableAssets, 120_000_000);
+  assert.equal(analysis.finance.retirementAvailableAssets, 0);
   assert.ok(
     analysis.warnings.some(
       (warning) => warning.code === 'DEBT_SERVICE_MISSING',
     ),
+  );
+});
+
+void test('현금성 자산은 지정 연도부터 생활비 부족을 메우고 잔액을 줄임', () => {
+  const result = simulate(
+    person({
+      birth: '19660101',
+      hasNps: false,
+      retirementAge: 60,
+      employmentIncomeEnabled: false,
+      preRetirementMonthlyIncome: 0,
+      deathAge: 65,
+    }),
+    person({ enabled: false, name: '배우자' }),
+    DEFAULT_POLICY,
+  );
+  const analysis = buildHouseholdCashflow({
+    result,
+    livingCost: {
+      reference: 'custom',
+      householdSize: 1,
+      basis: 'median',
+      customBaseYear: 2026,
+      customMonthlyAmount: 1_000_000,
+      annualInflationRate: 0,
+      survivorMode: 'same_as_couple',
+    },
+    finance: {
+      assets: [
+        {
+          id: 'cash',
+          name: '생활비 통장',
+          type: 'cash',
+          currentValue: 24_000_000,
+          retirementLiquidity: 'liquid',
+          retirementUse: {
+            mode: 'cover_gap',
+            startYear: 2026,
+            reserveAmount: 0,
+          },
+        },
+      ],
+      debts: [],
+      recurringIncomes: [],
+    },
+    annualNetReturnRate: 0,
+    includeLateLifeGap: true,
+    currentYear: 2026,
+  });
+
+  const row2026 = analysis.rows.find((row) => row.year === 2026);
+  const row2027 = analysis.rows.find((row) => row.year === 2027);
+  assert.equal(row2026?.assetWithdrawal, 1_000_000);
+  assert.equal(row2026?.monthlyGap, 0);
+  assert.equal(row2026?.remainingRetirementAssets, 12_000_000);
+  assert.equal(row2027?.assetWithdrawal, 1_000_000);
+  assert.equal(row2027?.remainingRetirementAssets, 0);
+  assert.equal(analysis.finance.plannedAssetWithdrawals, 24_000_000);
+  assert.ok(
+    analysis.exactGapPresentValueAfterAssets < analysis.exactGapPresentValue,
+  );
+});
+
+void test('부동산은 매각연도 전에는 인출하지 않고 매각 뒤 생활비에 사용', () => {
+  const result = simulate(
+    person({
+      birth: '19660101',
+      hasNps: false,
+      retirementAge: 60,
+      employmentIncomeEnabled: false,
+      preRetirementMonthlyIncome: 0,
+      deathAge: 65,
+    }),
+    person({ enabled: false, name: '배우자' }),
+    DEFAULT_POLICY,
+  );
+  const analysis = buildHouseholdCashflow({
+    result,
+    livingCost: {
+      reference: 'custom',
+      householdSize: 1,
+      basis: 'median',
+      customBaseYear: 2026,
+      customMonthlyAmount: 1_000_000,
+      annualInflationRate: 0,
+      survivorMode: 'same_as_couple',
+    },
+    finance: {
+      assets: [
+        {
+          id: 'home',
+          name: '매각 예정 주택',
+          type: 'primary_home',
+          currentValue: 12_000_000,
+          retirementLiquidity: 'sellable',
+          salePlan: {
+            enabled: true,
+            year: 2028,
+            sellingCostRate: 0,
+            capitalGainsTaxEstimate: 0,
+          },
+          retirementUse: {
+            mode: 'cover_gap',
+            startYear: 2028,
+            reserveAmount: 0,
+          },
+        },
+      ],
+      debts: [],
+      recurringIncomes: [],
+    },
+    annualNetReturnRate: 0,
+    includeLateLifeGap: true,
+    currentYear: 2026,
+  });
+
+  assert.equal(analysis.rows.find((row) => row.year === 2027)?.assetWithdrawal, 0);
+  assert.equal(
+    analysis.rows.find((row) => row.year === 2028)?.assetWithdrawal,
+    1_000_000,
   );
 });
 
