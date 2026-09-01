@@ -210,6 +210,89 @@ const initialForm = (): FormState => ({
   householdFinance: defaultHouseholdFinanceSettings(),
 });
 const money = (n: number) => `${Math.round(n).toLocaleString('ko-KR')}원`;
+type CashflowChartPoint = {
+  year: number;
+  ageA: number;
+  ageB: number | null;
+  label: string;
+  employmentIncome: number;
+  nationalPension: number;
+  basicPension: number;
+  privatePension: number;
+  rentalIncomeNet: number;
+  otherIncome: number;
+  incomeBeforeDebt: number;
+  debtService: number;
+  actual: number;
+  essential: number;
+  gap: number;
+  surplus: number;
+};
+
+function CashflowChartTooltip({
+  active,
+  payload,
+  result,
+  livingCostLegend,
+}: {
+  active?: boolean;
+  payload?: Array<{ payload?: CashflowChartPoint }>;
+  result: SimulationResult;
+  livingCostLegend: string;
+}) {
+  const point = payload?.[0]?.payload;
+  if (!active || !point) return null;
+  const pensionIncome =
+    point.nationalPension + point.basicPension + point.privatePension;
+  const balance = point.surplus - point.gap;
+  return (
+    <div className="min-w-[310px] rounded-xl border border-slate-200 bg-white p-4 text-xs shadow-xl">
+      <p className="font-black text-slate-950">
+        {point.year}년 · {result.a.name} {point.ageA}세
+        {point.ageB == null
+          ? ''
+          : ` · ${result.b?.name ?? '배우자'} ${point.ageB}세`}
+      </p>
+      <div className="mt-3 grid gap-2">
+        <div className="flex justify-between gap-4">
+          <span className="font-bold text-slate-700">① 총 월소득</span>
+          <b className="text-blue-700">{money(point.incomeBeforeDebt)}</b>
+        </div>
+        <p className="pl-3 text-[11px] leading-5 text-slate-500">
+          근로 {money(point.employmentIncome)} + 연금 {money(pensionIncome)} +
+          임대·기타 {money(point.rentalIncomeNet + point.otherIncome)}
+        </p>
+        <div className="flex justify-between gap-4">
+          <span className="font-bold text-slate-700">
+            ② 그해 월 대출 원리금
+          </span>
+          <b className="text-rose-700">-{money(point.debtService)}</b>
+        </div>
+        <div className="flex justify-between gap-4 rounded-md bg-blue-50 px-2 py-1.5">
+          <span className="font-black text-blue-950">③ 생활비 전 순현금</span>
+          <b className="text-blue-700">{money(point.actual)}</b>
+        </div>
+        <div className="flex justify-between gap-4">
+          <span className="font-bold text-slate-700">④ {livingCostLegend}</span>
+          <b className="text-orange-700">-{money(point.essential)}</b>
+        </div>
+        <div
+          className={`flex justify-between gap-4 border-t pt-2 text-sm ${
+            balance < 0 ? 'text-rose-800' : 'text-emerald-800'
+          }`}
+        >
+          <span className="font-black">⑤ 생활비 후 최종 차이</span>
+          <b>
+            {balance < 0
+              ? `-${money(Math.abs(balance))}`
+              : `+${money(balance)}`}
+          </b>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 const digits = (value: string) => Number(value.replace(/\D/g, '')) || 0;
 const currentAge = (birth: string) => {
   if (birth.length !== 8) return 55;
@@ -2633,15 +2716,7 @@ function IncomeEventTimeline({
   result: SimulationResult;
   policy: Policy;
   livingCost: LivingCostSettings;
-  chartData: Array<{
-    year: number;
-    ageA: number;
-    ageB: number | null;
-    label: string;
-    actual: number;
-    essential: number;
-    gap: number;
-  }>;
+  chartData: CashflowChartPoint[];
   livingCostLegend: string;
   cashflowRows: HouseholdCashflowRow[];
 }) {
@@ -2764,27 +2839,23 @@ function IncomeEventTimeline({
                 axisLine={{ stroke: '#94a3b8' }}
               />
               <Tooltip
-                labelFormatter={(_, payload) => {
-                  const point = payload?.[0]?.payload as
-                    | { year?: number; ageA?: number; ageB?: number | null }
-                    | undefined;
-                  return point
-                    ? `${point.year}년 · ${result.a.name} ${point.ageA}세${point.ageB == null ? '' : ` · ${result.b?.name ?? '배우자'} ${point.ageB}세`}`
-                    : '';
-                }}
-                formatter={(value, name) => [
-                  money(Number(value)),
-                  name === 'actual'
-                    ? '가구소득 - 그해 월 대출상환액'
-                    : name === 'essential'
-                      ? livingCostLegend
-                      : '생활비 기준 부족액',
-                ]}
+                content={(props) => (
+                  <CashflowChartTooltip
+                    active={props.active}
+                    payload={
+                      props.payload as unknown as Array<{
+                        payload?: CashflowChartPoint;
+                      }>
+                    }
+                    result={result}
+                    livingCostLegend={livingCostLegend}
+                  />
+                )}
               />
               <Legend
                 formatter={(value) =>
                   value === 'actual'
-                    ? '가구소득 - 그해 월 대출상환액'
+                    ? '생활비 전 순현금(총소득 - 월 대출 원리금)'
                     : value === 'essential'
                       ? livingCostLegend
                       : '생활비 기준 부족액'
@@ -3849,9 +3920,18 @@ function LivingCostIncomeReport({
         ageA: row.ageA,
         ageB: row.ageB,
         label: `${row.ageA}세`,
+        employmentIncome: row.employmentIncome,
+        nationalPension: row.nationalPension,
+        basicPension: row.basicPension,
+        privatePension: row.privatePension,
+        rentalIncomeNet: row.rentalIncomeNet,
+        otherIncome: row.otherIncome,
+        incomeBeforeDebt: row.householdIncomeBeforeDebt,
+        debtService: row.debtService,
         actual: row.householdCashIncomeAfterDebt,
         essential: row.livingCost,
         gap: row.monthlyGap,
+        surplus: row.monthlySurplus,
       })),
     [cashflow.rows],
   );
