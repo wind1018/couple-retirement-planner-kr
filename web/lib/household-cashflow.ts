@@ -4,6 +4,17 @@ import {
   livingCostMonthly,
   type LivingCostSettings,
 } from './public-pension.ts';
+import {
+  DEFAULT_REAL_ESTATE_COST_POLICY,
+  estimateHomePurchaseCosts,
+  estimateHomeSaleCosts,
+  estimateAnnualResidentialHoldingTaxes,
+  type HoldingTaxPropertyInput,
+  type HoldingTaxSettings,
+  type PurchaseCostAutoSettings,
+  type RealEstateCostPolicy,
+  type SaleCostAutoSettings,
+} from './real-estate-costs.ts';
 
 export type AssetType =
   | 'cash'
@@ -35,6 +46,7 @@ export type HousingMovePlan = {
   purchasePrice: number;
   purchaseCostRate?: number;
   purchaseTaxEstimate?: number;
+  purchaseAutoCostSettings?: PurchaseCostAutoSettings;
   replacementAnnualAppreciationRate?: number;
   interimAnnualReturnRate?: number;
   surplusName: string;
@@ -68,6 +80,7 @@ export type HouseholdAsset = {
     year: number;
     sellingCostRate?: number;
     capitalGainsTaxEstimate?: number;
+    autoCostSettings?: SaleCostAutoSettings;
   };
   rental?: {
     enabled: boolean;
@@ -79,6 +92,7 @@ export type HouseholdAsset = {
     startYear?: number;
     endYear?: number | null;
   };
+  holdingTax?: HoldingTaxSettings;
 };
 
 export type HouseholdDebt = {
@@ -91,6 +105,7 @@ export type HouseholdDebt = {
   manualMonthlyPayment?: number;
   maturityYear?: number;
   linkedAssetId?: string;
+  payoffOnLinkedAssetSale?: boolean;
 };
 
 export type RecurringIncome = {
@@ -107,6 +122,7 @@ export type HouseholdFinanceSettings = {
   assets: HouseholdAsset[];
   debts: HouseholdDebt[];
   recurringIncomes: RecurringIncome[];
+  realEstateCostPolicy?: RealEstateCostPolicy;
 };
 
 export type CashflowWarning = {
@@ -130,6 +146,12 @@ export type HouseholdCashflowRow = {
   rentalIncomeNet: number;
   otherIncome: number;
   debtService: number;
+  propertyHoldingTax: number;
+  propertyHoldingTaxDetails: {
+    assetId: string;
+    name: string;
+    amount: number;
+  }[];
   householdIncomeBeforeDebt: number;
   householdCashIncomeAfterDebt: number;
   monthlyGapBeforeAsset: number;
@@ -146,14 +168,31 @@ export type HouseholdCashflowRow = {
     assetId: string;
     transactionKind: 'sale' | 'purchase' | 'sale_and_purchase';
     soldAssetName: string;
+    saleProceedsBeforeDebtPayoff?: number;
     saleProceeds: number;
     purchasedAssetName?: string;
     purchaseCost?: number;
     investableSurplus: number;
     fundingShortfall: number;
+    saleBrokerage?: number;
+    capitalGainsTaxes?: number;
+    purchaseBrokerage?: number;
+    acquisitionTaxes?: number;
+    linkedDebtPayoff?: number;
+    linkedDebtPayoffDetails?: {
+      debtId: string;
+      name: string;
+      amount: number;
+    }[];
+    debtPayoffFundingShortfall?: number;
+    roughEstimatePolicyId?: string;
   }[];
   householdCashAvailableAfterAsset: number;
+  grossAssetBalance: number;
+  liabilityBalance: number;
+  netWorthBalance: number;
   remainingRetirementAssets: number;
+  cashAndFinancialAssetBalance: number;
   replacementHousingValue: number;
   livingCost: number;
   monthlyGap: number;
@@ -177,6 +216,8 @@ export type HouseholdFinanceSummary = {
   plannedAssetWithdrawals: number;
   plannedAssetReturnIncome: number;
   plannedAssetReinvestedReturns: number;
+  linkedDebtPayoffsAtSale: number;
+  linkedDebtPayoffFundingShortfall: number;
   housingMoveInvestableSurplus: number;
   housingPurchaseFundingShortfall: number;
   remainingPlannedAssetsAtEnd: number;
@@ -186,6 +227,8 @@ export type HouseholdFinanceSummary = {
   monthlyRentalIncomeNetAtBaseYear: number;
   monthlyOtherIncomeAtBaseYear: number;
   monthlyDebtServiceAtBaseYear: number;
+  monthlyPropertyHoldingTaxAtBaseYear: number;
+  plannedPropertyHoldingTaxes: number;
   completeness: {
     debtService: CashflowCompleteness;
     rentalNetIncome: CashflowCompleteness;
@@ -217,6 +260,7 @@ export const defaultHouseholdFinanceSettings =
     assets: [],
     debts: [],
     recurringIncomes: [],
+    realEstateCostPolicy: DEFAULT_REAL_ESTATE_COST_POLICY,
   });
 
 const round = (value: number) => Math.round(value);
@@ -300,11 +344,45 @@ function amortizingPayment(
   );
 }
 
-function debtServiceAtYear(
+function linkedAssetSaleYear(debt: HouseholdDebt, assets: HouseholdAsset[]) {
+  if (!debt.payoffOnLinkedAssetSale || !debt.linkedAssetId) return null;
+  const linkedAsset = assets.find((asset) => asset.id === debt.linkedAssetId);
+  return linkedAsset?.salePlan?.enabled ? linkedAsset.salePlan.year : null;
+}
+
+function debtBalanceAtStartOfYear(
   debt: HouseholdDebt,
   year: number,
   baseYear: number,
 ) {
+  const principal = Math.max(0, debt.principal);
+  if (principal <= 0 || (debt.maturityYear && year > debt.maturityYear))
+    return 0;
+  if (debt.repaymentType !== 'amortizing') return principal;
+  const months = Math.max(0, debt.remainingMonths ?? 0);
+  if (months <= 0 || debt.annualInterestRate == null) return principal;
+  const elapsedMonths = Math.min(months, Math.max(0, year - baseYear) * 12);
+  if (elapsedMonths >= months) return 0;
+  const monthlyRate = Math.max(0, debt.annualInterestRate) / 100 / 12;
+  if (monthlyRate === 0)
+    return Math.max(0, principal * (1 - elapsedMonths / months));
+  const payment = amortizingPayment(principal, debt.annualInterestRate, months);
+  const growth = (1 + monthlyRate) ** elapsedMonths;
+  return Math.max(
+    0,
+    principal * growth - payment * ((growth - 1) / monthlyRate),
+  );
+}
+
+export function resolveDebtServiceAtYear(
+  debt: HouseholdDebt,
+  year: number,
+  baseYear: number,
+  assets: HouseholdAsset[],
+) {
+  const payoffYear = linkedAssetSaleYear(debt, assets);
+  if (payoffYear != null && year >= payoffYear)
+    return { amount: 0, incomplete: false };
   if (debt.principal <= 0 || (debt.maturityYear && year > debt.maturityYear))
     return { amount: 0, incomplete: false };
   const repaymentType = debt.repaymentType;
@@ -406,35 +484,111 @@ export function buildGapPeriods(
   return periods;
 }
 
-function availableAssetValue(asset: HouseholdAsset, currentYear: number) {
+function availableAssetValue(
+  asset: HouseholdAsset,
+  debts: HouseholdDebt[],
+  currentYear: number,
+  realEstatePolicy: RealEstateCostPolicy,
+) {
   if (asset.currentValue <= 0) return 0;
   const plan = resolveAssetUsePlan(asset, currentYear);
   if (plan.mode === 'hold') return 0;
   const reserve = Math.max(0, plan.reserveAmount ?? 0);
-  if (asset.retirementLiquidity === 'liquid')
-    return Math.max(0, asset.currentValue - reserve);
   if (asset.salePlan?.enabled) {
-    const sellingCost = clampRate(asset.salePlan?.sellingCostRate);
-    const netSaleValue = Math.max(
-      0,
-      asset.currentValue * (1 - sellingCost) -
-        (asset.salePlan?.capitalGainsTaxEstimate ?? 0),
-    );
+    const netSaleValue = resolveSaleTransaction(
+      asset,
+      asset.currentValue,
+      asset.salePlan.year,
+      realEstatePolicy,
+    ).netProceeds;
+    const linkedDebtPayoff = debts
+      .filter(
+        (debt) =>
+          debt.linkedAssetId === asset.id && debt.payoffOnLinkedAssetSale,
+      )
+      .reduce(
+        (sum, debt) =>
+          sum +
+          debtBalanceAtStartOfYear(debt, asset.salePlan!.year, currentYear),
+        0,
+      );
+    const netSaleValueAfterDebt = Math.max(0, netSaleValue - linkedDebtPayoff);
     const move = asset.housingMovePlan;
     if (move?.enabled) {
-      const replacementCost = Math.max(
-        0,
-        move.purchasePrice * (1 + clampRate(move.purchaseCostRate)) +
-          (move.purchaseTaxEstimate ?? 0),
-      );
-      return Math.max(0, netSaleValue - replacementCost - reserve);
+      const replacementCost = resolvePurchaseTransaction(
+        move,
+        realEstatePolicy,
+      ).totalCost;
+      return Math.max(0, netSaleValueAfterDebt - replacementCost - reserve);
     }
-    return Math.max(
-      0,
-      netSaleValue - reserve,
-    );
+    return Math.max(0, netSaleValueAfterDebt - reserve);
   }
+  if (asset.retirementLiquidity === 'liquid')
+    return Math.max(0, asset.currentValue - reserve);
   return 0;
+}
+
+function resolveSaleTransaction(
+  asset: HouseholdAsset,
+  grossSalePrice: number,
+  saleYear: number,
+  realEstatePolicy: RealEstateCostPolicy,
+) {
+  const sale = asset.salePlan;
+  if (sale?.autoCostSettings?.enabled) {
+    const estimate = estimateHomeSaleCosts({
+      projectedSalePrice: grossSalePrice,
+      saleYear,
+      settings: sale.autoCostSettings,
+      policy: realEstatePolicy,
+    });
+    return {
+      netProceeds: Math.max(0, grossSalePrice - estimate.totalSellingCosts),
+      saleBrokerage: estimate.brokerage.total,
+      capitalGainsTaxes: estimate.totalCapitalGainsTaxes,
+      roughEstimatePolicyId: estimate.policyId,
+    };
+  }
+  const manualSellingCosts = grossSalePrice * clampRate(sale?.sellingCostRate);
+  const manualTax = Math.max(0, sale?.capitalGainsTaxEstimate ?? 0);
+  return {
+    netProceeds: Math.max(0, grossSalePrice - manualSellingCosts - manualTax),
+    saleBrokerage: undefined,
+    capitalGainsTaxes: manualTax,
+    roughEstimatePolicyId: undefined,
+  };
+}
+
+function resolvePurchaseTransaction(
+  move: HousingMovePlan,
+  realEstatePolicy: RealEstateCostPolicy,
+) {
+  if (move.purchaseAutoCostSettings?.enabled) {
+    const estimate = estimateHomePurchaseCosts({
+      purchasePrice: move.purchasePrice,
+      settings: move.purchaseAutoCostSettings,
+      policy: realEstatePolicy,
+    });
+    return {
+      totalCost: Math.max(0, move.purchasePrice + estimate.totalPurchaseCosts),
+      purchaseBrokerage: estimate.brokerage.total,
+      acquisitionTaxes:
+        estimate.acquisitionTax +
+        estimate.localEducationTax +
+        estimate.ruralSpecialTax,
+      roughEstimatePolicyId: estimate.policyId,
+    };
+  }
+  return {
+    totalCost: Math.max(
+      0,
+      move.purchasePrice * (1 + clampRate(move.purchaseCostRate)) +
+        (move.purchaseTaxEstimate ?? 0),
+    ),
+    purchaseBrokerage: undefined,
+    acquisitionTaxes: Math.max(0, move.purchaseTaxEstimate ?? 0),
+    roughEstimatePolicyId: undefined,
+  };
 }
 
 export function resolveAssetUsePlan(
@@ -459,7 +613,9 @@ const signedAnnualRate = (value: number | undefined) =>
 function applyAssetUsePlans(
   baseRows: HouseholdCashflowRow[],
   assets: HouseholdAsset[],
+  debts: HouseholdDebt[],
   currentYear: number,
+  realEstatePolicy: RealEstateCostPolicy,
 ) {
   const states = assets.map((asset) => ({
     asset,
@@ -468,12 +624,24 @@ function applyAssetUsePlans(
     sold: false,
     purchased: false,
     replacementHomeBalance: 0,
+    saleBrokerage: undefined as number | undefined,
+    capitalGainsTaxes: undefined as number | undefined,
+    saleRoughEstimatePolicyId: undefined as string | undefined,
+    saleProceedsBeforeDebtPayoff: undefined as number | undefined,
+    linkedDebtPayoff: 0,
+    linkedDebtPayoffDetails: [] as NonNullable<
+      HouseholdCashflowRow['assetTransactionDetails'][number]['linkedDebtPayoffDetails']
+    >,
+    debtPayoffFundingShortfall: 0,
   }));
   let totalWithdrawals = 0;
   let totalReturnIncome = 0;
   let totalReinvestedReturns = 0;
+  let totalLinkedDebtPayoffs = 0;
+  let totalLinkedDebtPayoffFundingShortfall = 0;
   let totalHousingMoveSurplus = 0;
   let totalHousingPurchaseShortfall = 0;
+  let totalPropertyHoldingTaxes = 0;
   const rows = baseRows.map((baseRow, rowIndex): HouseholdCashflowRow => {
     const year = baseRow.year;
     let annualReturnIncome = 0;
@@ -517,12 +685,43 @@ function applyAssetUsePlans(
     for (const state of states) {
       const sale = state.asset.salePlan;
       if (sale?.enabled && !state.sold && year >= sale.year) {
-        state.balance = Math.max(
-          0,
-          state.balance * (1 - clampRate(sale.sellingCostRate)) -
-            (sale.capitalGainsTaxEstimate ?? 0),
+        const saleResult = resolveSaleTransaction(
+          state.asset,
+          state.balance,
+          year,
+          realEstatePolicy,
         );
+        const linkedDebtPayoffDetails = debts
+          .filter(
+            (debt) =>
+              debt.linkedAssetId === state.asset.id &&
+              debt.payoffOnLinkedAssetSale,
+          )
+          .map((debt) => ({
+            debtId: debt.id,
+            name: debt.name,
+            amount: round(debtBalanceAtStartOfYear(debt, year, currentYear)),
+          }))
+          .filter((detail) => detail.amount > 0);
+        const linkedDebtPayoff = linkedDebtPayoffDetails.reduce(
+          (sum, detail) => sum + detail.amount,
+          0,
+        );
+        const debtPayoffFundingShortfall = Math.max(
+          0,
+          linkedDebtPayoff - saleResult.netProceeds,
+        );
+        state.saleProceedsBeforeDebtPayoff = saleResult.netProceeds;
+        state.linkedDebtPayoff = linkedDebtPayoff;
+        state.linkedDebtPayoffDetails = linkedDebtPayoffDetails;
+        state.debtPayoffFundingShortfall = debtPayoffFundingShortfall;
+        state.balance = Math.max(0, saleResult.netProceeds - linkedDebtPayoff);
+        state.saleBrokerage = saleResult.saleBrokerage;
+        state.capitalGainsTaxes = saleResult.capitalGainsTaxes;
+        state.saleRoughEstimatePolicyId = saleResult.roughEstimatePolicyId;
         state.sold = true;
+        totalLinkedDebtPayoffs += linkedDebtPayoff;
+        totalLinkedDebtPayoffFundingShortfall += debtPayoffFundingShortfall;
         const move = state.asset.housingMovePlan;
         const effectivePurchaseYear = Math.max(
           sale.year,
@@ -533,9 +732,16 @@ function applyAssetUsePlans(
             assetId: state.asset.id,
             transactionKind: 'sale',
             soldAssetName: state.asset.name,
+            saleProceedsBeforeDebtPayoff: round(saleResult.netProceeds),
             saleProceeds: round(state.balance),
             investableSurplus: move?.enabled ? 0 : round(state.balance),
             fundingShortfall: 0,
+            saleBrokerage: saleResult.saleBrokerage,
+            capitalGainsTaxes: saleResult.capitalGainsTaxes,
+            linkedDebtPayoff: round(linkedDebtPayoff),
+            linkedDebtPayoffDetails,
+            debtPayoffFundingShortfall: round(debtPayoffFundingShortfall),
+            roughEstimatePolicyId: saleResult.roughEstimatePolicyId,
           });
       }
     }
@@ -548,11 +754,8 @@ function applyAssetUsePlans(
       const effectivePurchaseYear = Math.max(sale.year, move.purchaseYear);
       if (year < effectivePurchaseYear) continue;
       const availableBeforePurchase = state.balance;
-      const purchaseCost = Math.max(
-        0,
-        move.purchasePrice * (1 + clampRate(move.purchaseCostRate)) +
-          (move.purchaseTaxEstimate ?? 0),
-      );
+      const purchaseResult = resolvePurchaseTransaction(move, realEstatePolicy);
+      const purchaseCost = purchaseResult.totalCost;
       const investableSurplus = Math.max(
         0,
         availableBeforePurchase - purchaseCost,
@@ -579,17 +782,96 @@ function applyAssetUsePlans(
           ? 'sale_and_purchase'
           : 'purchase',
         soldAssetName: state.asset.name,
+        saleProceedsBeforeDebtPayoff: saleAndPurchaseSameYear
+          ? state.saleProceedsBeforeDebtPayoff
+          : undefined,
         saleProceeds: round(availableBeforePurchase),
         purchasedAssetName: move.replacementName,
         purchaseCost: round(purchaseCost),
         investableSurplus: round(investableSurplus),
         fundingShortfall: round(fundingShortfall),
+        saleBrokerage: saleAndPurchaseSameYear
+          ? state.saleBrokerage
+          : undefined,
+        capitalGainsTaxes: saleAndPurchaseSameYear
+          ? state.capitalGainsTaxes
+          : undefined,
+        purchaseBrokerage: purchaseResult.purchaseBrokerage,
+        acquisitionTaxes: purchaseResult.acquisitionTaxes,
+        linkedDebtPayoff: saleAndPurchaseSameYear
+          ? round(state.linkedDebtPayoff)
+          : undefined,
+        linkedDebtPayoffDetails: saleAndPurchaseSameYear
+          ? state.linkedDebtPayoffDetails
+          : undefined,
+        debtPayoffFundingShortfall: saleAndPurchaseSameYear
+          ? round(state.debtPayoffFundingShortfall)
+          : undefined,
+        roughEstimatePolicyId:
+          purchaseResult.roughEstimatePolicyId ??
+          (saleAndPurchaseSameYear
+            ? state.saleRoughEstimatePolicyId
+            : undefined),
       });
     }
 
+    const holdingTaxInputs = states.flatMap((state) => {
+      const settings = state.asset.holdingTax;
+      if (!settings?.enabled) return [];
+      const usesReplacementHome = Boolean(
+        state.asset.housingMovePlan?.enabled && state.purchased,
+      );
+      const marketValue = usesReplacementHome
+        ? state.replacementHomeBalance
+        : state.sold
+          ? 0
+          : state.balance;
+      if (marketValue <= 0) return [];
+      const assessedValueRatio =
+        state.asset.currentValue > 0
+          ? settings.assessedValue / state.asset.currentValue
+          : 0.7;
+      return [
+        {
+          id: state.asset.id,
+          name: usesReplacementHome
+            ? (state.asset.housingMovePlan?.replacementName ?? state.asset.name)
+            : state.asset.name,
+          marketValue,
+          settings: {
+            ...settings,
+            assessedValue: marketValue * assessedValueRatio,
+          },
+        } satisfies HoldingTaxPropertyInput,
+      ];
+    });
+    const holdingTaxEstimate = estimateAnnualResidentialHoldingTaxes(
+      holdingTaxInputs,
+      realEstatePolicy,
+    );
+    const propertyHoldingTaxDetails = holdingTaxEstimate.perProperty
+      .filter((estimate) => {
+        const input = holdingTaxInputs.find((item) => item.id === estimate.id);
+        return input?.settings.includeInCashflow && estimate.annualTotal > 0;
+      })
+      .map((estimate) => ({
+        assetId: estimate.id,
+        name:
+          holdingTaxInputs.find((item) => item.id === estimate.id)?.name ??
+          '부동산',
+        amount: round(estimate.annualTotal / 12),
+      }));
+    const propertyHoldingTax = round(
+      propertyHoldingTaxDetails.reduce((sum, detail) => sum + detail.amount, 0),
+    );
+    totalPropertyHoldingTaxes += propertyHoldingTax * 12;
+
     let annualWithdrawal = 0;
     const details: HouseholdCashflowRow['assetWithdrawalDetails'] = [];
-    const drawFrom = (state: (typeof states)[number], requestedAnnual: number) => {
+    const drawFrom = (
+      state: (typeof states)[number],
+      requestedAnnual: number,
+    ) => {
       const reserve = Math.max(0, state.plan.reserveAmount ?? 0);
       const drawable = Math.max(0, state.balance - reserve);
       const amount = Math.min(drawable, Math.max(0, requestedAnnual));
@@ -622,7 +904,8 @@ function applyAssetUsePlans(
         drawFrom(state, Math.max(0, plan.monthlyAmount ?? 0) * 12);
       if (plan.mode === 'cover_gap') {
         const cashIncludingPriorDraws =
-          baseRow.householdCashIncomeAfterDebt +
+          baseRow.householdCashIncomeAfterDebt -
+          propertyHoldingTax +
           annualReturnIncome / 12 +
           annualWithdrawal / 12;
         const remainingMonthlyGap = Math.max(
@@ -642,7 +925,8 @@ function applyAssetUsePlans(
     const householdCashAvailableAfterAsset =
       baseRow.householdCashIncomeAfterDebt +
       assetReturnIncome +
-      assetWithdrawal;
+      assetWithdrawal -
+      propertyHoldingTax;
     const remainingRetirementAssets = round(
       states
         .filter(
@@ -652,22 +936,57 @@ function applyAssetUsePlans(
         )
         .reduce((sum, state) => sum + state.balance, 0),
     );
+    const cashAndFinancialAssetBalance = round(
+      states
+        .filter(
+          (state) =>
+            state.asset.type === 'cash' ||
+            state.asset.type === 'financial' ||
+            state.sold,
+        )
+        .reduce((sum, state) => sum + state.balance, 0),
+    );
     const replacementHousingValue = round(
+      states.reduce((sum, state) => sum + state.replacementHomeBalance, 0),
+    );
+    const grossAssetBalance = round(
       states.reduce(
-        (sum, state) => sum + state.replacementHomeBalance,
+        (sum, state) => sum + state.balance + state.replacementHomeBalance,
         0,
       ),
     );
+    const liabilityBalance = round(
+      debts.reduce((sum, debt) => {
+        const linkedState = debt.linkedAssetId
+          ? states.find((state) => state.asset.id === debt.linkedAssetId)
+          : undefined;
+        if (debt.payoffOnLinkedAssetSale && linkedState?.sold) return sum;
+        return sum + debtBalanceAtStartOfYear(debt, year, currentYear);
+      }, 0),
+    );
     return {
       ...baseRow,
+      monthlyGapBeforeAsset: round(
+        Math.max(
+          0,
+          baseRow.livingCost -
+            (baseRow.householdCashIncomeAfterDebt - propertyHoldingTax),
+        ),
+      ),
       assetWithdrawal,
       assetWithdrawalDetails: details,
+      propertyHoldingTax,
+      propertyHoldingTaxDetails,
       assetReturnIncome,
       assetReturnIncomeDetails: returnIncomeDetails,
       assetReinvestedReturn,
       assetTransactionDetails: transactionDetails,
       householdCashAvailableAfterAsset: round(householdCashAvailableAfterAsset),
+      grossAssetBalance,
+      liabilityBalance,
+      netWorthBalance: round(grossAssetBalance - liabilityBalance),
       remainingRetirementAssets,
+      cashAndFinancialAssetBalance,
       replacementHousingValue,
       monthlyGap: round(
         Math.max(0, baseRow.livingCost - householdCashAvailableAfterAsset),
@@ -682,8 +1001,13 @@ function applyAssetUsePlans(
     totalWithdrawals: round(totalWithdrawals),
     totalReturnIncome: round(totalReturnIncome),
     totalReinvestedReturns: round(totalReinvestedReturns),
+    linkedDebtPayoffs: round(totalLinkedDebtPayoffs),
+    linkedDebtPayoffFundingShortfall: round(
+      totalLinkedDebtPayoffFundingShortfall,
+    ),
     housingMoveSurplus: round(totalHousingMoveSurplus),
     housingPurchaseShortfall: round(totalHousingPurchaseShortfall),
+    propertyHoldingTaxes: round(totalPropertyHoldingTaxes),
     remainingAssets: rows.at(-1)?.remainingRetirementAssets ?? 0,
     replacementHousingValue: rows.at(-1)?.replacementHousingValue ?? 0,
   };
@@ -720,6 +1044,8 @@ export function buildHouseholdCashflow({
   currentYear?: number;
   policy?: Policy;
 }): HouseholdCashflowAnalysis {
+  const realEstateCostPolicy =
+    finance.realEstateCostPolicy ?? DEFAULT_REAL_ESTATE_COST_POLICY;
   const rowByYear = new Map(result.rows.map((row) => [row.year, row]));
   const lastDeathYear = Math.max(
     result.a.deathYear,
@@ -778,7 +1104,7 @@ export function buildHouseholdCashflow({
         0,
       );
       const debts = finance.debts.map((debt) =>
-        debtServiceAtYear(debt, year, currentYear),
+        resolveDebtServiceAtYear(debt, year, currentYear, finance.assets),
       );
       anyDebtIncomplete ||= debts.some((debt) => debt.incomplete);
       const debtService = debts.reduce((sum, debt) => sum + debt.amount, 0);
@@ -822,6 +1148,8 @@ export function buildHouseholdCashflow({
         rentalIncomeNet: round(rentalIncomeNet),
         otherIncome: round(otherIncome),
         debtService: round(debtService),
+        propertyHoldingTax: 0,
+        propertyHoldingTaxDetails: [],
         householdIncomeBeforeDebt: round(householdIncomeBeforeDebt),
         householdCashIncomeAfterDebt: round(householdCashIncomeAfterDebt),
         monthlyGapBeforeAsset: round(
@@ -834,7 +1162,11 @@ export function buildHouseholdCashflow({
         assetReinvestedReturn: 0,
         assetTransactionDetails: [],
         householdCashAvailableAfterAsset: round(householdCashIncomeAfterDebt),
+        grossAssetBalance: 0,
+        liabilityBalance: 0,
+        netWorthBalance: 0,
         remainingRetirementAssets: 0,
+        cashAndFinancialAssetBalance: 0,
         replacementHousingValue: 0,
         livingCost: livingCostAmount,
         monthlyGap: round(
@@ -847,7 +1179,13 @@ export function buildHouseholdCashflow({
       };
     },
   );
-  const assetUse = applyAssetUsePlans(baseRows, finance.assets, currentYear);
+  const assetUse = applyAssetUsePlans(
+    baseRows,
+    finance.assets,
+    finance.debts,
+    currentYear,
+    realEstateCostPolicy,
+  );
   const rows = assetUse.rows;
   const gapPeriodsBeforeAssets = buildGapPeriods(
     baseRows,
@@ -913,7 +1251,14 @@ export function buildHouseholdCashflow({
   );
   const retirementAvailableAssets = round(
     finance.assets.reduce(
-      (sum, asset) => sum + availableAssetValue(asset, currentYear),
+      (sum, asset) =>
+        sum +
+        availableAssetValue(
+          asset,
+          finance.debts,
+          currentYear,
+          realEstateCostPolicy,
+        ),
       0,
     ),
   );
@@ -929,6 +1274,8 @@ export function buildHouseholdCashflow({
     plannedAssetWithdrawals: assetUse.totalWithdrawals,
     plannedAssetReturnIncome: assetUse.totalReturnIncome,
     plannedAssetReinvestedReturns: assetUse.totalReinvestedReturns,
+    linkedDebtPayoffsAtSale: assetUse.linkedDebtPayoffs,
+    linkedDebtPayoffFundingShortfall: assetUse.linkedDebtPayoffFundingShortfall,
     housingMoveInvestableSurplus: assetUse.housingMoveSurplus,
     housingPurchaseFundingShortfall: assetUse.housingPurchaseShortfall,
     remainingPlannedAssetsAtEnd: assetUse.remainingAssets,
@@ -942,6 +1289,8 @@ export function buildHouseholdCashflow({
     monthlyRentalIncomeNetAtBaseYear: baseRow?.rentalIncomeNet ?? 0,
     monthlyOtherIncomeAtBaseYear: baseRow?.otherIncome ?? 0,
     monthlyDebtServiceAtBaseYear: baseRow?.debtService ?? 0,
+    monthlyPropertyHoldingTaxAtBaseYear: baseRow?.propertyHoldingTax ?? 0,
+    plannedPropertyHoldingTaxes: assetUse.propertyHoldingTaxes,
     completeness: {
       debtService: anyDebtIncomplete ? 'incomplete' : 'complete',
       rentalNetIncome: anyRentalPartial ? 'partial' : 'complete',
@@ -962,6 +1311,40 @@ export function buildHouseholdCashflow({
       message:
         '대출 원금은 순자산에서 차감했지만 금리·상환방식·월 상환액 정보가 부족하여 일부 대출상환액을 현금흐름에 반영하지 못했습니다.',
       affectedMetric: 'monthlyGap',
+    });
+  const invalidLinkedDebts = finance.debts.filter(
+    (debt) =>
+      debt.payoffOnLinkedAssetSale &&
+      (!debt.linkedAssetId ||
+        !finance.assets.some((asset) => asset.id === debt.linkedAssetId)),
+  );
+  if (invalidLinkedDebts.length)
+    warnings.push({
+      code: 'LINKED_DEBT_ASSET_MISSING',
+      severity: 'warning',
+      message: `${invalidLinkedDebts.map((debt) => debt.name).join(', ')}은(는) 매각 시 자동상환을 선택했지만 연결 자산을 찾을 수 없습니다. 대출의 연결 자산을 다시 선택하세요.`,
+      affectedMetric: 'assetTransactionDetails',
+    });
+  const linkedDebtsWithoutSale = finance.debts.filter((debt) => {
+    if (!debt.payoffOnLinkedAssetSale || !debt.linkedAssetId) return false;
+    const linkedAsset = finance.assets.find(
+      (asset) => asset.id === debt.linkedAssetId,
+    );
+    return linkedAsset != null && !linkedAsset.salePlan?.enabled;
+  });
+  if (linkedDebtsWithoutSale.length)
+    warnings.push({
+      code: 'LINKED_DEBT_SALE_NOT_SCHEDULED',
+      severity: 'warning',
+      message: `${linkedDebtsWithoutSale.map((debt) => debt.name).join(', ')}의 연결 자산에 매각 계획이 없어 자동상환 시점이 정해지지 않았습니다. 자산의 매각 계획을 설정하세요.`,
+      affectedMetric: 'assetTransactionDetails',
+    });
+  if (assetUse.linkedDebtPayoffFundingShortfall > 0)
+    warnings.push({
+      code: 'LINKED_DEBT_PAYOFF_SHORTFALL',
+      severity: 'critical',
+      message: `연결 자산의 비용·세금 차감 후 매각대금보다 자동상환할 대출잔액이 커 총 ${round(assetUse.linkedDebtPayoffFundingShortfall).toLocaleString('ko-KR')}원의 별도 상환자금이 필요합니다.`,
+      affectedMetric: 'assetTransactionDetails',
     });
   if (anyRentalPartial)
     warnings.push({
@@ -1022,6 +1405,38 @@ export function buildHouseholdCashflow({
       message: `주택 매각대금보다 새 주택 구입비용이 커 총 ${round(assetUse.housingPurchaseShortfall).toLocaleString('ko-KR')}원의 별도 구입자금이 필요합니다. 이 금액은 월 생활비 부족액과 분리된 일시 필요재원입니다.`,
       affectedMetric: 'assetTransactionDetails',
     });
+  const roughHoldingTaxAssets = finance.assets.filter(
+    (asset) => asset.holdingTax?.enabled,
+  );
+  const roughTransactionAssets = finance.assets.filter(
+    (asset) =>
+      asset.salePlan?.autoCostSettings?.enabled ||
+      asset.housingMovePlan?.purchaseAutoCostSettings?.enabled,
+  );
+  const roughRealEstateAssets = [
+    ...new Map(
+      [...roughHoldingTaxAssets, ...roughTransactionAssets].map((asset) => [
+        asset.id,
+        asset,
+      ]),
+    ).values(),
+  ];
+  if (roughRealEstateAssets.length)
+    warnings.push({
+      code: 'REAL_ESTATE_COST_ROUGH_ESTIMATE',
+      severity: 'warning',
+      message: `${[
+        roughHoldingTaxAssets.length
+          ? `${roughHoldingTaxAssets.map((asset) => asset.name).join(', ')}의 재산세·종합부동산세`
+          : '',
+        roughTransactionAssets.length
+          ? `${roughTransactionAssets.map((asset) => asset.name).join(', ')}의 거래세금·중개보수`
+          : '',
+      ]
+        .filter(Boolean)
+        .join(', ')}는 ${realEstateCostPolicy.policyId} 기준 참고 추정입니다. 자동계산을 켜지 않은 보유세·거래비용은 포함하지 않습니다. 미래 세법 변화를 예측하지 않으며 실제 세부담상한·고령자/장기보유 공제·비과세·중과·감면·필요경비는 세무사·관할기관에 확인하세요.`,
+      affectedMetric: 'assetTransactionDetails',
+    });
   return {
     baseYear: currentYear,
     discountRate: annualNetReturnRate,
@@ -1036,13 +1451,16 @@ export function buildHouseholdCashflow({
     exactGapPresentValueAfterAssets,
     conservativeStressCapital,
     fundingNeedAfterAvailableAssets,
-    suggestedMonthlyContribution: round(
-      monthlyContributionForPresentValue(
-        fundingNeedAfterAvailableAssets,
-        monthsUntilFirstGap,
-        annualNetReturnRate,
-      ),
-    ),
+    suggestedMonthlyContribution:
+      monthsUntilFirstGap > 0
+        ? round(
+            monthlyContributionForPresentValue(
+              fundingNeedAfterAvailableAssets,
+              monthsUntilFirstGap,
+              annualNetReturnRate,
+            ),
+          )
+        : 0,
     finance: financeSummary,
     warnings,
   };

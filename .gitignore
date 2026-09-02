@@ -1,10 +1,5 @@
-bin/
-obj/
-.dotnet-home/
-.nuget-packages/
 artifacts/
+tmp/
 .git-history-backup/
 *.npsprofile
 *.npspolicy
-NPS_POLICY_AI_*_KIT_*.zip
-NpsSimulator-win-x64-*.zip

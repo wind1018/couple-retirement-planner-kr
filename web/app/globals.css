@@ -48,7 +48,19 @@
   --radius-4xl: calc(var(--radius) * 2.6);
 }
 
+html,
+body,
+#root {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: hidden;
+  overflow-x: clip;
+  overscroll-behavior-x: none;
+}
+
 body {
+  margin: 0;
   font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', Arial, sans-serif;
 }
 
@@ -136,5 +148,154 @@ body {
   }
   html {
     @apply font-sans;
+  }
+}
+
+@media print {
+  @page {
+    size: A4 landscape;
+    margin: 9mm;
+  }
+
+  html,
+  body,
+  #root {
+    width: auto !important;
+    max-width: none !important;
+    overflow: visible !important;
+    background: white !important;
+  }
+
+  body {
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+
+  [data-print='hide'] {
+    display: none !important;
+  }
+
+  [data-print='only'] {
+    display: block !important;
+  }
+
+  main,
+  main > div {
+    width: 100% !important;
+    max-width: none !important;
+    overflow: visible !important;
+    background: white !important;
+  }
+
+  main > div {
+    padding: 0 !important;
+  }
+
+  [data-print='report'] {
+    display: block !important;
+  }
+
+  [data-print='report'] > * {
+    margin-bottom: 12px !important;
+  }
+
+  [data-print='report'] button,
+  [data-print='report'] input,
+  [data-print='report'] select,
+  [data-print='report'] [role='slider'] {
+    display: none !important;
+  }
+
+  [data-print='report'] [data-slot='card'] {
+    box-shadow: none !important;
+    break-inside: auto;
+  }
+
+  [data-print-section='cashflow-chart'] {
+    break-before: page;
+  }
+
+  [data-print-block='cashflow-chart'] {
+    break-inside: avoid-page;
+  }
+
+  [data-print='chart-canvas'] {
+    height: 330px !important;
+  }
+
+  [data-print='report'] [data-slot='table-container'],
+  [data-print='report'] .overflow-auto,
+  [data-print='report'] .overflow-x-auto {
+    max-height: none !important;
+    overflow: visible !important;
+  }
+
+  [data-print='report'] [data-slot='table'] {
+    width: 100% !important;
+    min-width: 0 !important;
+    font-size: 8.5px !important;
+  }
+
+  [data-print='report'] [data-slot='table-header'] {
+    display: table-header-group !important;
+  }
+
+  [data-print='report'] [data-slot='table-row'] {
+    break-inside: avoid-page;
+  }
+
+  [data-print='report'] [data-slot='table-head'],
+  [data-print='report'] [data-slot='table-cell'] {
+    padding: 4px !important;
+    white-space: normal !important;
+    word-break: keep-all !important;
+    overflow-wrap: break-word !important;
+    line-height: 1.35 !important;
+  }
+
+  [data-print-table='funding'] [data-slot='table'] {
+    table-layout: fixed !important;
+    font-size: 8px !important;
+  }
+
+  [data-print-table='funding'] [data-slot='formula-line'] {
+    grid-template-columns: minmax(0, 1fr) !important;
+    gap: 0 !important;
+  }
+
+  [data-print-table='funding'] [data-slot='formula-line'] > b {
+    text-align: left !important;
+  }
+
+  [data-print-table='funding'] th:nth-child(1) {
+    width: 10% !important;
+  }
+
+  [data-print-table='funding'] th:nth-child(2) {
+    width: 11% !important;
+  }
+
+  [data-print-table='funding'] th:nth-child(3) {
+    width: 15% !important;
+  }
+
+  [data-print-table='funding'] th:nth-child(4) {
+    width: 16% !important;
+  }
+
+  [data-print-table='funding'] th:nth-child(5) {
+    width: 16% !important;
+  }
+
+  [data-print-table='funding'] th:nth-child(6) {
+    width: 15% !important;
+  }
+
+  [data-print-table='funding'] th:nth-child(7) {
+    width: 17% !important;
+  }
+
+  [data-print='report'] svg {
+    max-width: 100% !important;
   }
 }

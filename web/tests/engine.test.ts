@@ -34,6 +34,139 @@ import {
 } from '../lib/income-timeline.ts';
 import { buildAiAnalysisMarkdown } from '../lib/ai-analysis-markdown.ts';
 import { buildHouseholdCashflow } from '../lib/household-cashflow.ts';
+import {
+  DEFAULT_REAL_ESTATE_COST_POLICY,
+  estimateAnnualResidentialHoldingTaxes,
+  estimateHomePurchaseCosts,
+  estimateHomeSaleCosts,
+  estimateHousingBrokerage,
+  validateRealEstateCostPolicy,
+} from '../lib/real-estate-costs.ts';
+import {
+  buildPolicyUpdateMarkdown,
+  parsePolicyUpdateMarkdown,
+} from '../lib/real-estate-policy-markdown.ts';
+
+void test('AI 통합 정책 Markdown은 연금·부동산 정책만 고정 JSON 블록에서 복원', () => {
+  const markdown = buildPolicyUpdateMarkdown(
+    DEFAULT_POLICY,
+    DEFAULT_REAL_ESTATE_COST_POLICY,
+    new Date('2026-09-02T00:00:00.000Z'),
+  );
+  const parsed = parsePolicyUpdateMarkdown(
+    `이 문장은 앱에서 실행하지 않습니다.\n${markdown}\n추가 설명도 무시합니다.`,
+  );
+  assert.equal(parsed.pensionPolicy.policyId, DEFAULT_POLICY.policyId);
+  assert.equal(
+    parsed.realEstatePolicy.policyId,
+    DEFAULT_REAL_ESTATE_COST_POLICY.policyId,
+  );
+  assert.ok(parsed.researchSources.length >= 3);
+  assert.throws(
+    () =>
+      parsePolicyUpdateMarkdown(
+        `${markdown}\n<!-- COUPLE_PENSION_POLICY_UPDATE_JSON_START -->`,
+      ),
+    /중복/,
+  );
+});
+
+void test('검증된 부동산 정책값을 바꾸면 계산기가 새 중개보수율을 사용', () => {
+  const custom = validateRealEstateCostPolicy({
+    ...DEFAULT_REAL_ESTATE_COST_POLICY,
+    policyId: 'TEST-REAL-ESTATE-UPDATE',
+    brokerage: {
+      ...DEFAULT_REAL_ESTATE_COST_POLICY.brokerage,
+      brackets: DEFAULT_REAL_ESTATE_COST_POLICY.brokerage.brackets.map(
+        (bracket, index) =>
+          index === 0 ? { ...bracket, upperRate: 0.005 } : bracket,
+      ),
+    },
+  });
+  assert.equal(
+    estimateHousingBrokerage(40_000_000, false, custom).amountBeforeVat,
+    200_000,
+  );
+});
+
+void test('주택 보유세는 재산세와 종부세를 합산해 연간·월평균으로 러프 계산', () => {
+  const estimate = estimateAnnualResidentialHoldingTaxes([
+    {
+      id: 'home',
+      name: '아파트',
+      marketValue: 2_000_000_000,
+      settings: {
+        enabled: true,
+        includeInCashflow: true,
+        assessedValue: 1_500_000_000,
+        householdHomeCount: 1,
+        oneHouseholdOneHome: true,
+        soleOwner: 'a',
+        jointOwnership: false,
+        ownerAShareRate: 100,
+        includeUrbanAreaTax: true,
+      },
+    },
+  ]);
+  assert.equal(estimate.propertyTax, 2_970_000);
+  assert.equal(estimate.localEducationTax, 594_000);
+  assert.equal(estimate.urbanAreaTax, 1_260_000);
+  assert.equal(estimate.comprehensiveRealEstateTax, 468_000);
+  assert.equal(estimate.ruralSpecialTax, 93_600);
+  assert.equal(estimate.annualTotal, 5_385_600);
+  assert.equal(estimate.monthlyAverage, 448_800);
+});
+
+void test('주택 중개보수 상한과 취득 관련 비용을 현재 기준으로 러프 계산', () => {
+  const brokerage = estimateHousingBrokerage(1_500_000_000, true);
+  assert.equal(brokerage.amountBeforeVat, 10_500_000);
+  assert.equal(brokerage.vat, 1_050_000);
+  const purchase = estimateHomePurchaseCosts({
+    purchasePrice: 1_500_000_000,
+    settings: {
+      enabled: true,
+      homeCountAfterPurchase: 'one_or_temporary_two',
+      regulatedArea: false,
+      exclusiveAreaOver85: false,
+      includeBrokerageVat: true,
+      jointOwnership: true,
+      ownerAShareRate: 60,
+    },
+  });
+  assert.equal(purchase.acquisitionTaxRate, 3);
+  assert.equal(purchase.acquisitionTax, 45_000_000);
+  assert.equal(purchase.localEducationTax, 4_500_000);
+  assert.equal(purchase.totalPurchaseCosts, 61_050_000);
+  assert.equal(purchase.ownerACostShare, 36_630_000);
+});
+
+void test('공동명의 양도세 참고 계산은 명의자별 기본공제와 누진세율을 적용', () => {
+  const base = {
+    enabled: true,
+    acquisitionYear: 2016,
+    acquisitionPrice: 1_000_000_000,
+    residenceYears: 0,
+    necessaryExpenses: 0,
+    householdHomeCountAtSale: 1 as const,
+    regulatedArea: false,
+    oneHouseExemptionEligible: false,
+    includeBrokerageVat: true,
+    ownerAShareRate: 50,
+  };
+  const single = estimateHomeSaleCosts({
+    projectedSalePrice: 2_000_000_000,
+    saleYear: 2026,
+    settings: { ...base, jointOwnership: false },
+  });
+  const joint = estimateHomeSaleCosts({
+    projectedSalePrice: 2_000_000_000,
+    saleYear: 2026,
+    settings: { ...base, jointOwnership: true },
+  });
+  assert.ok(joint.totalCapitalGainsTaxes < single.totalCapitalGainsTaxes);
+  assert.ok(joint.ownerATax > 0);
+  assert.ok(joint.ownerBTax > 0);
+});
 
 const person = (overrides: Partial<PersonInput> = {}): PersonInput => ({
   enabled: true,
@@ -675,12 +808,144 @@ void test('AI 상담용 Markdown은 계산 결과를 담고 생년월일 전체�
   });
 
   assert.match(markdown, /# AI 상담용 부부 연금·은퇴 종합현황/);
-  assert.match(markdown, /schema_version: "2.0"/);
+  assert.match(markdown, /schema_version: "2.1"/);
+  assert.match(markdown, /real_estate_policy_id:/);
   assert.match(markdown, /## 0\. 계산 완성도/);
   assert.match(markdown, /## AI에게 요청할 분석/);
+  assert.match(markdown, /## 6\. 금액 기준·부호·열 정의/);
+  assert.match(markdown, /## 7\. 핵심 사건·의사결정 연도/);
+  assert.match(markdown, /자산활용 전 부족/);
+  assert.match(markdown, /인출 후 부족/);
+  assert.match(markdown, /첫 사망 이후 후기 위험/);
+  assert.match(markdown, /실제 누락·위험에 따른 확인 질문/);
   assert.match(markdown, /본인 60세/);
   assert.match(markdown, /노후 부부 적정 생활비/);
   assert.doesNotMatch(markdown, /19800101/);
+});
+
+void test('AI 상담용 Markdown은 자산 인출 전후 부족과 첫 사망 이후 위험을 분리', () => {
+  const result = simulate(
+    person({
+      name: '본인',
+      birth: '19660101',
+      hasNps: false,
+      employmentIncomeEnabled: false,
+      preRetirementMonthlyIncome: 0,
+      retirementAge: 60,
+      deathAge: 65,
+    }),
+    person({
+      name: '배우자',
+      birth: '19700101',
+      hasNps: false,
+      employmentIncomeEnabled: false,
+      preRetirementMonthlyIncome: 0,
+      retirementAge: 60,
+      deathAge: 75,
+    }),
+    DEFAULT_POLICY,
+  );
+  const markdown = buildAiAnalysisMarkdown({
+    result,
+    policy: DEFAULT_POLICY,
+    npsInflation: { enabled: false, annualRate: 0 },
+    basicPension: { a: false, b: false },
+    livingCost: {
+      reference: 'custom',
+      householdSize: 2,
+      basis: 'median',
+      customBaseYear: 2026,
+      customMonthlyAmount: 1_000_000,
+      annualInflationRate: 0,
+      survivorMode: 'ratio',
+      survivorRatio: 75,
+    },
+    plannerNetReturnRate: 0,
+    householdFinance: {
+      assets: [
+        {
+          id: 'cash',
+          name: '생활비 예금',
+          type: 'cash',
+          currentValue: 24_000_000,
+          retirementLiquidity: 'liquid',
+          retirementUse: {
+            mode: 'cover_gap',
+            startYear: 2026,
+            reserveAmount: 0,
+          },
+        },
+      ],
+      debts: [],
+      recurringIncomes: [],
+    },
+    includeLateLifeGap: false,
+    generatedAt: new Date('2026-09-02T00:00:00.000Z'),
+  });
+
+  assert.match(markdown, /생활비용 자산 원금 인출 시작/);
+  assert.match(markdown, /현금·금융자산 잔액 소진/);
+  assert.match(markdown, /첫 사망 이전 기본계획:/);
+  assert.match(markdown, /첫 사망 이후 후기 위험:/);
+  assert.match(markdown, /현금·예금/);
+  assert.doesNotMatch(markdown, /\| cash \|/);
+});
+
+void test('AI 상담용 Markdown은 현금화 비용 차감액과 자동계산 대출 상환액을 명시', () => {
+  const result = simulate(
+    person({ hasNps: false, employmentIncomeEnabled: false, deathAge: 70 }),
+    person({ enabled: false, name: '배우자' }),
+    DEFAULT_POLICY,
+  );
+  const markdown = buildAiAnalysisMarkdown({
+    result,
+    policy: DEFAULT_POLICY,
+    npsInflation: { enabled: false, annualRate: 0 },
+    basicPension: { a: false, b: false },
+    livingCost: {
+      reference: 'custom',
+      householdSize: 1,
+      basis: 'median',
+      customBaseYear: 2026,
+      customMonthlyAmount: 0,
+      annualInflationRate: 0,
+      survivorMode: 'same_as_couple',
+    },
+    plannerNetReturnRate: 0,
+    householdFinance: {
+      assets: [
+        {
+          id: 'jeonse',
+          name: '전세보증금',
+          type: 'jeonse_deposit',
+          currentValue: 205_000_000,
+          retirementLiquidity: 'liquid',
+          salePlan: { enabled: true, year: 2026, sellingCostRate: 1 },
+          retirementUse: {
+            mode: 'cover_gap',
+            startYear: 2026,
+            reserveAmount: 0,
+          },
+        },
+      ],
+      debts: [
+        {
+          id: 'loan',
+          name: '담보대출',
+          principal: 120_000_000,
+          repaymentType: 'interest_only',
+          annualInterestRate: 3.6,
+        },
+      ],
+      recurringIncomes: [],
+    },
+    includeLateLifeGap: true,
+    generatedAt: new Date('2026-09-02T00:00:00.000Z'),
+  });
+
+  assert.match(markdown, /은퇴 활용 가능 자산: 202,950,000원/);
+  assert.match(markdown, /\| 담보대출 \|[^\n]+360,000원 \(자동계산\)/);
+  assert.doesNotMatch(markdown, /자동계산 또는 미입력/);
 });
 
 void test('부분은퇴부터 부족을 찾고 여러 부족구간과 실제 PV를 분리', () => {
@@ -828,12 +1093,81 @@ void test('현금성 자산은 지정 연도부터 생활비 부족을 메우고
   assert.equal(row2026?.assetWithdrawal, 1_000_000);
   assert.equal(row2026?.monthlyGap, 0);
   assert.equal(row2026?.remainingRetirementAssets, 12_000_000);
+  assert.equal(row2026?.cashAndFinancialAssetBalance, 12_000_000);
+  assert.equal(row2026?.grossAssetBalance, 12_000_000);
+  assert.equal(row2026?.liabilityBalance, 0);
+  assert.equal(row2026?.netWorthBalance, 12_000_000);
   assert.equal(row2027?.assetWithdrawal, 1_000_000);
   assert.equal(row2027?.remainingRetirementAssets, 0);
+  assert.equal(row2027?.cashAndFinancialAssetBalance, 0);
   assert.equal(analysis.finance.plannedAssetWithdrawals, 24_000_000);
   assert.ok(
     analysis.exactGapPresentValueAfterAssets < analysis.exactGapPresentValue,
   );
+});
+
+void test('선택한 주택 보유세는 월 비용으로 전체 현금흐름에서 차감', () => {
+  const result = simulate(
+    person({
+      birth: '19660101',
+      hasNps: false,
+      retirementAge: 60,
+      employmentIncomeEnabled: false,
+      preRetirementMonthlyIncome: 0,
+      deathAge: 65,
+    }),
+    person({ enabled: false, name: '배우자' }),
+    DEFAULT_POLICY,
+  );
+  const analysis = buildHouseholdCashflow({
+    result,
+    livingCost: {
+      reference: 'custom',
+      householdSize: 1,
+      basis: 'median',
+      customBaseYear: 2026,
+      customMonthlyAmount: 1_000_000,
+      annualInflationRate: 0,
+      survivorMode: 'same_as_couple',
+    },
+    finance: {
+      assets: [
+        {
+          id: 'home',
+          name: '아파트',
+          type: 'primary_home',
+          currentValue: 2_000_000_000,
+          retirementLiquidity: 'exclude',
+          holdingTax: {
+            enabled: true,
+            includeInCashflow: true,
+            assessedValue: 1_500_000_000,
+            householdHomeCount: 1,
+            oneHouseholdOneHome: true,
+            soleOwner: 'a',
+            jointOwnership: false,
+            ownerAShareRate: 100,
+            includeUrbanAreaTax: true,
+          },
+        },
+      ],
+      debts: [],
+      recurringIncomes: [],
+    },
+    annualNetReturnRate: 0,
+    includeLateLifeGap: true,
+    currentYear: 2026,
+  });
+  const row2026 = analysis.rows.find((row) => row.year === 2026);
+  assert.equal(row2026?.propertyHoldingTax, 448_800);
+  assert.equal(row2026?.monthlyGapBeforeAsset, 1_448_800);
+  assert.equal(row2026?.monthlyGap, 1_448_800);
+  assert.equal(analysis.finance.monthlyPropertyHoldingTaxAtBaseYear, 448_800);
+  const roughWarning = analysis.warnings.find(
+    (warning) => warning.code === 'REAL_ESTATE_COST_ROUGH_ESTIMATE',
+  );
+  assert.ok(roughWarning);
+  assert.match(roughWarning.message, /재산세·종합부동산세/);
 });
 
 void test('부동산은 매각연도 전에는 인출하지 않고 매각 뒤 생활비에 사용', () => {
@@ -889,7 +1223,10 @@ void test('부동산은 매각연도 전에는 인출하지 않고 매각 뒤 �
     currentYear: 2026,
   });
 
-  assert.equal(analysis.rows.find((row) => row.year === 2027)?.assetWithdrawal, 0);
+  assert.equal(
+    analysis.rows.find((row) => row.year === 2027)?.assetWithdrawal,
+    0,
+  );
   assert.equal(
     analysis.rows.find((row) => row.year === 2028)?.assetWithdrawal,
     1_000_000,
@@ -968,6 +1305,7 @@ void test('주택 매각 후 새 주택 구입 차액을 운용자산과 현금�
   const purchaseRow = analysis.rows.find((row) => row.year === 2032);
   const returnRow = analysis.rows.find((row) => row.year === 2033);
   assert.equal(saleRow?.assetTransactionDetails[0]?.transactionKind, 'sale');
+  assert.equal(saleRow?.cashAndFinancialAssetBalance, 2_500_000_000);
   assert.equal(
     purchaseRow?.assetTransactionDetails[0]?.purchasedAssetName,
     'B 아파트',
@@ -977,13 +1315,221 @@ void test('주택 매각 후 새 주택 구입 차액을 운용자산과 현금�
     1_101_000_000,
   );
   assert.equal(purchaseRow?.replacementHousingValue, 1_500_000_000);
+  assert.equal(purchaseRow?.cashAndFinancialAssetBalance, 1_101_000_000);
   assert.equal(returnRow?.assetReturnIncome, 2_752_500);
-  assert.equal(
-    returnRow?.householdCashAvailableAfterAsset,
-    2_752_500,
-  );
+  assert.equal(returnRow?.householdCashAvailableAfterAsset, 2_752_500);
   assert.equal(analysis.finance.housingMoveInvestableSurplus, 1_101_000_000);
   assert.equal(analysis.finance.housingPurchaseFundingShortfall, 0);
+});
+
+void test('자동 부동산 비용은 매각 순액과 거래 상세·경고에 함께 반영', () => {
+  const result = simulate(
+    person({ hasNps: false, employmentIncomeEnabled: false, deathAge: 70 }),
+    person({ enabled: false, name: '배우자' }),
+    DEFAULT_POLICY,
+  );
+  const settings = {
+    enabled: true,
+    acquisitionYear: 2016,
+    acquisitionPrice: 1_000_000_000,
+    residenceYears: 0,
+    necessaryExpenses: 0,
+    householdHomeCountAtSale: 1 as const,
+    regulatedArea: false,
+    oneHouseExemptionEligible: false,
+    includeBrokerageVat: true,
+    jointOwnership: true,
+    ownerAShareRate: 50,
+  };
+  const estimate = estimateHomeSaleCosts({
+    projectedSalePrice: 1_500_000_000,
+    saleYear: 2026,
+    settings,
+  });
+  const analysis = buildHouseholdCashflow({
+    result,
+    livingCost: {
+      reference: 'custom',
+      householdSize: 1,
+      basis: 'median',
+      customBaseYear: 2026,
+      customMonthlyAmount: 0,
+      annualInflationRate: 0,
+      survivorMode: 'same_as_couple',
+    },
+    finance: {
+      assets: [
+        {
+          id: 'auto-tax-home',
+          name: '세금 자동계산 주택',
+          type: 'primary_home',
+          currentValue: 1_500_000_000,
+          retirementLiquidity: 'sellable',
+          salePlan: { enabled: true, year: 2026, autoCostSettings: settings },
+        },
+      ],
+      debts: [],
+      recurringIncomes: [],
+    },
+    annualNetReturnRate: 0,
+    includeLateLifeGap: true,
+    currentYear: 2026,
+  });
+  const detail = analysis.rows[0].assetTransactionDetails[0];
+  assert.equal(detail.saleProceeds, 1_500_000_000 - estimate.totalSellingCosts);
+  assert.equal(detail.saleBrokerage, estimate.brokerage.total);
+  assert.equal(detail.capitalGainsTaxes, estimate.totalCapitalGainsTaxes);
+  const roughWarning = analysis.warnings.find(
+    (warning) => warning.code === 'REAL_ESTATE_COST_ROUGH_ESTIMATE',
+  );
+  assert.ok(roughWarning);
+  assert.match(roughWarning.message, /거래세금·중개보수/);
+  assert.doesNotMatch(roughWarning.message, /재산세·종합부동산세/);
+});
+
+void test('연결 자산 매각 시 분할상환 대출의 추정 잔액을 먼저 갚고 이후 월 상환을 종료', () => {
+  const result = simulate(
+    person({ hasNps: false, employmentIncomeEnabled: false, deathAge: 70 }),
+    person({ enabled: false, name: '배우자' }),
+    DEFAULT_POLICY,
+  );
+  const principal = 500_000_000;
+  const annualInterestRate = 3.6;
+  const remainingMonths = 356;
+  const saleYear = 2030;
+  const currentYear = 2026;
+  const monthlyRate = annualInterestRate / 100 / 12;
+  const payment =
+    (principal * monthlyRate * (1 + monthlyRate) ** remainingMonths) /
+    ((1 + monthlyRate) ** remainingMonths - 1);
+  const elapsedMonths = (saleYear - currentYear) * 12;
+  const expectedBalance = Math.round(
+    principal * (1 + monthlyRate) ** elapsedMonths -
+      payment * (((1 + monthlyRate) ** elapsedMonths - 1) / monthlyRate),
+  );
+  const analysis = buildHouseholdCashflow({
+    result,
+    livingCost: {
+      reference: 'custom',
+      householdSize: 1,
+      basis: 'median',
+      customBaseYear: currentYear,
+      customMonthlyAmount: 0,
+      annualInflationRate: 0,
+      survivorMode: 'same_as_couple',
+    },
+    finance: {
+      assets: [
+        {
+          id: 'secured-home',
+          name: '담보 주택',
+          type: 'primary_home',
+          currentValue: 1_500_000_000,
+          retirementLiquidity: 'sellable',
+          annualAppreciationRate: 0,
+          salePlan: {
+            enabled: true,
+            year: saleYear,
+            sellingCostRate: 0,
+            capitalGainsTaxEstimate: 0,
+          },
+          retirementUse: {
+            mode: 'cover_gap',
+            startYear: saleYear,
+            reserveAmount: 0,
+          },
+        },
+      ],
+      debts: [
+        {
+          id: 'mortgage',
+          name: '주택담보대출',
+          principal,
+          repaymentType: 'amortizing',
+          annualInterestRate,
+          remainingMonths,
+          linkedAssetId: 'secured-home',
+          payoffOnLinkedAssetSale: true,
+        },
+      ],
+      recurringIncomes: [],
+    },
+    annualNetReturnRate: 0,
+    includeLateLifeGap: true,
+    currentYear,
+  });
+  const beforeSale = analysis.rows.find((row) => row.year === saleYear - 1);
+  const saleRow = analysis.rows.find((row) => row.year === saleYear);
+  const detail = saleRow?.assetTransactionDetails[0];
+  assert.ok((beforeSale?.debtService ?? 0) > 0);
+  assert.ok((beforeSale?.liabilityBalance ?? 0) > 0);
+  assert.equal(saleRow?.debtService, 0);
+  assert.equal(saleRow?.liabilityBalance, 0);
+  assert.equal(
+    saleRow?.netWorthBalance,
+    saleRow?.grossAssetBalance,
+  );
+  assert.equal(detail?.saleProceedsBeforeDebtPayoff, 1_500_000_000);
+  assert.equal(detail?.linkedDebtPayoff, expectedBalance);
+  assert.equal(detail?.saleProceeds, 1_500_000_000 - expectedBalance);
+  assert.equal(analysis.finance.linkedDebtPayoffsAtSale, expectedBalance);
+  assert.equal(
+    analysis.finance.retirementAvailableAssets,
+    1_500_000_000 - expectedBalance,
+  );
+});
+
+void test('매각 순대금보다 연결대출 잔액이 크면 별도 상환자금 경고', () => {
+  const result = simulate(
+    person({ hasNps: false, employmentIncomeEnabled: false, deathAge: 70 }),
+    person({ enabled: false, name: '배우자' }),
+    DEFAULT_POLICY,
+  );
+  const analysis = buildHouseholdCashflow({
+    result,
+    livingCost: {
+      reference: 'custom',
+      householdSize: 1,
+      basis: 'median',
+      customBaseYear: 2026,
+      customMonthlyAmount: 0,
+      annualInflationRate: 0,
+      survivorMode: 'same_as_couple',
+    },
+    finance: {
+      assets: [
+        {
+          id: 'underwater-home',
+          name: '매각 주택',
+          type: 'primary_home',
+          currentValue: 400_000_000,
+          retirementLiquidity: 'sellable',
+          salePlan: { enabled: true, year: 2026, sellingCostRate: 0 },
+        },
+      ],
+      debts: [
+        {
+          id: 'underwater-mortgage',
+          name: '담보대출',
+          principal: 500_000_000,
+          repaymentType: 'interest_only',
+          annualInterestRate: 3.6,
+          linkedAssetId: 'underwater-home',
+          payoffOnLinkedAssetSale: true,
+        },
+      ],
+      recurringIncomes: [],
+    },
+    annualNetReturnRate: 0,
+    includeLateLifeGap: true,
+    currentYear: 2026,
+  });
+  assert.equal(analysis.finance.linkedDebtPayoffFundingShortfall, 100_000_000);
+  assert.ok(
+    analysis.warnings.some(
+      (warning) => warning.code === 'LINKED_DEBT_PAYOFF_SHORTFALL',
+    ),
+  );
 });
 
 void test('첫 사망 후 생활비 비율과 유족연금 전환연도는 일치', () => {

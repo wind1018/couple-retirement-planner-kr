@@ -1,12 +1,19 @@
 'use client';
 
-import { ChangeEvent, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  ChangeEvent,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
   Download,
   Eye,
   EyeOff,
   ExternalLink,
   FileText,
+  FilePlus2,
   FileKey,
   LockKeyhole,
   Plus,
@@ -22,7 +29,6 @@ import {
   Area,
   CartesianGrid,
   ComposedChart,
-  Legend,
   Line,
   ReferenceLine,
   ResponsiveContainer,
@@ -41,6 +47,14 @@ import {
   CardTitle,
 } from '@/components/ui/card';
 import { Checkbox } from '@/components/ui/checkbox';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import {
   NativeSelect,
@@ -104,6 +118,15 @@ import {
 } from '@/lib/secure-session';
 import { buildAiAnalysisMarkdown } from '@/lib/ai-analysis-markdown';
 import {
+  buildPolicyUpdateMarkdown,
+  parsePolicyUpdateMarkdown,
+  type PolicyUpdatePackage,
+} from '@/lib/real-estate-policy-markdown';
+import {
+  DEFAULT_REAL_ESTATE_COST_POLICY,
+  validateRealEstateCostPolicy,
+} from '@/lib/real-estate-costs';
+import {
   buildHouseholdCashflow,
   defaultHouseholdFinanceSettings,
   resolveAssetUsePlan,
@@ -136,9 +159,15 @@ type SavedProfile = {
   form: SavedForm;
   policy: Policy;
 };
+type ProfileFileMode = 'none' | 'direct' | 'download';
+type ProfileDialogMode = 'save' | 'load' | 'save-as' | null;
+type ProfileSaveKind = 'json' | 'session' | null;
 type ProfileFileHandle = {
   name: string;
   getFile: () => Promise<File>;
+  queryPermission?: (options: {
+    mode: 'readwrite';
+  }) => Promise<PermissionState>;
   requestPermission?: (options: {
     mode: 'readwrite';
   }) => Promise<PermissionState>;
@@ -212,6 +241,59 @@ const initialForm = (): FormState => ({
   householdFinance: defaultHouseholdFinanceSettings(),
 });
 const money = (n: number) => `${Math.round(n).toLocaleString('ko-KR')}원`;
+
+const cashflowPhaseMeta = (phase: string) => {
+  const phases: Record<string, { label: string; className: string }> = {
+    working: {
+      label: '은퇴 전',
+      className: 'border-slate-300 bg-slate-100 text-slate-800',
+    },
+    partial_retirement: {
+      label: '한 사람 은퇴 후',
+      className: 'border-amber-300 bg-amber-100 text-amber-900',
+    },
+    full_retirement: {
+      label: '가구 은퇴 후',
+      className: 'border-violet-300 bg-violet-100 text-violet-900',
+    },
+    survivor: {
+      label: '첫 사망 이후',
+      className: 'border-rose-300 bg-rose-100 text-rose-900',
+    },
+  };
+  return (
+    phases[phase] ?? {
+      label: phase,
+      className: 'border-slate-300 bg-slate-100 text-slate-800',
+    }
+  );
+};
+
+function CompactFormulaLine({
+  label,
+  value,
+  tone = 'neutral',
+}: {
+  label: string;
+  value: string;
+  tone?: 'neutral' | 'positive' | 'negative' | 'result';
+}) {
+  const valueColor = {
+    neutral: 'text-slate-900',
+    positive: 'text-emerald-800',
+    negative: 'text-rose-900',
+    result: 'text-blue-800',
+  }[tone];
+  return (
+    <span
+      data-slot="formula-line"
+      className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-baseline gap-2"
+    >
+      <span className="min-w-0 text-slate-600">{label}</span>
+      <b className={`whitespace-nowrap text-right ${valueColor}`}>{value}</b>
+    </span>
+  );
+}
 type CashflowChartPoint = {
   year: number;
   ageA: number;
@@ -225,6 +307,8 @@ type CashflowChartPoint = {
   otherIncome: number;
   incomeBeforeDebt: number;
   debtService: number;
+  propertyHoldingTax: number;
+  propertyHoldingTaxDetails: HouseholdCashflowRow['propertyHoldingTaxDetails'];
   assetWithdrawal: number;
   assetWithdrawalDetails: { assetId: string; name: string; amount: number }[];
   assetReturnIncome: number;
@@ -236,6 +320,7 @@ type CashflowChartPoint = {
   assetReinvestedReturn: number;
   assetTransactionDetails: HouseholdCashflowRow['assetTransactionDetails'];
   remainingRetirementAssets: number;
+  cashAndFinancialAssetBalance: number;
   replacementHousingValue: number;
   actual: number;
   essential: number;
@@ -243,16 +328,85 @@ type CashflowChartPoint = {
   surplus: number;
 };
 
+function CashflowYearAgeTick({
+  x = 0,
+  y = 0,
+  payload,
+  chartData,
+}: {
+  x?: number | string;
+  y?: number | string;
+  payload?: { value?: number | string };
+  chartData: CashflowChartPoint[];
+}) {
+  const year = Number(payload?.value);
+  const point = chartData.find((item) => item.year === year);
+  if (!point) return null;
+  return (
+    <g transform={`translate(${Number(x)},${Number(y)})`}>
+      <text textAnchor="middle" fill="#475569" fontSize={10}>
+        <tspan x="0" dy="12" fontWeight={800}>
+          {year}년
+        </tspan>
+      </text>
+      {point.ageB == null ? (
+        <text
+          x="0"
+          y="27"
+          textAnchor="middle"
+          fill="#2563eb"
+          fontSize={10}
+          fontWeight={800}
+        >
+          {point.ageA}세
+        </text>
+      ) : (
+        <>
+          <text
+            x="-5"
+            y="27"
+            textAnchor="end"
+            fill="#2563eb"
+            fontSize={10}
+            fontWeight={800}
+          >
+            {point.ageA}세
+          </text>
+          <text x="0" y="27" textAnchor="middle" fill="#94a3b8" fontSize={9}>
+            /
+          </text>
+          <text
+            x="5"
+            y="27"
+            textAnchor="start"
+            fill="#7c3aed"
+            fontSize={10}
+            fontWeight={800}
+          >
+            {point.ageB}세
+          </text>
+        </>
+      )}
+    </g>
+  );
+}
+
 function CashflowChartTooltip({
   active,
   payload,
   result,
   livingCostLegend,
+  pinned = false,
+  onPin,
+  onUnpin,
 }: {
   active?: boolean;
   payload?: Array<{ payload?: CashflowChartPoint }>;
   result: SimulationResult;
   livingCostLegend: string;
+  pinned?: boolean;
+  onPin?: (point: CashflowChartPoint) => void;
+  onUnpin?: () => void;
 }) {
   const point = payload?.[0]?.payload;
   if (!active || !point) return null;
@@ -260,7 +414,35 @@ function CashflowChartTooltip({
     point.nationalPension + point.basicPension + point.privatePension;
   const balance = point.surplus - point.gap;
   return (
-    <div className="min-w-[310px] rounded-xl border border-slate-200 bg-white p-4 text-xs shadow-xl">
+    <div
+      data-cashflow-tooltip-pinned={pinned ? 'true' : undefined}
+      className={`pointer-events-auto relative z-50 w-[330px] max-w-[calc(100vw-3rem)] overflow-y-auto overscroll-contain rounded-xl border bg-white p-4 text-xs shadow-xl ${
+        pinned
+          ? 'cursor-default border-emerald-500 ring-2 ring-emerald-200'
+          : 'border-slate-200'
+      }`}
+      style={{ maxHeight: 'min(380px, calc(100vh - 4rem))' }}
+    >
+      {pinned ? (
+        <div className="sticky -top-4 z-10 -mx-4 -mt-4 mb-3 flex items-center justify-between gap-3 border-b border-emerald-200 bg-emerald-50 px-4 py-2 text-[11px] font-black text-emerald-900">
+          <span>상세창 고정됨 · 안쪽을 스크롤하세요</span>
+          <button
+            type="button"
+            className="shrink-0 rounded-md border border-emerald-300 bg-white px-2 py-1 text-emerald-900 hover:bg-emerald-100"
+            onClick={() => onUnpin?.()}
+          >
+            고정 해제
+          </button>
+        </div>
+      ) : (
+        <button
+          type="button"
+          className="sticky -top-4 z-10 -mx-4 -mt-4 mb-3 block w-[calc(100%+2rem)] border-b border-violet-100 bg-violet-50 px-4 py-2 text-left text-[11px] font-black text-violet-900 hover:bg-violet-100"
+          onClick={() => onPin?.(point)}
+        >
+          클릭하면 상세창 고정 · 내부 스크롤 가능
+        </button>
+      )}
       <p className="font-black text-slate-950">
         {point.year}년 · {result.a.name} {point.ageA}세
         {point.ageB == null
@@ -283,7 +465,20 @@ function CashflowChartTooltip({
           <b className="text-rose-700">-{money(point.debtService)}</b>
         </div>
         <div className="flex justify-between gap-4">
-          <span className="font-bold text-slate-700">③ 현금으로 받는 운용수익</span>
+          <span className="font-bold text-slate-700">③ 월 부동산 보유세</span>
+          <b className="text-rose-700">-{money(point.propertyHoldingTax)}</b>
+        </div>
+        {point.propertyHoldingTaxDetails.length > 0 && (
+          <p className="pl-3 text-[11px] leading-5 text-rose-700">
+            {point.propertyHoldingTaxDetails
+              .map((detail) => `${detail.name} ${money(detail.amount)}`)
+              .join(' + ')}
+          </p>
+        )}
+        <div className="flex justify-between gap-4">
+          <span className="font-bold text-slate-700">
+            ④ 현금으로 받는 운용수익
+          </span>
           <b className="text-emerald-700">+{money(point.assetReturnIncome)}</b>
         </div>
         {point.assetReturnIncomeDetails.length > 0 && (
@@ -294,7 +489,7 @@ function CashflowChartTooltip({
           </p>
         )}
         <div className="flex justify-between gap-4">
-          <span className="font-bold text-slate-700">④ 자산 원금 인출</span>
+          <span className="font-bold text-slate-700">⑤ 자산 원금 인출</span>
           <b className="text-violet-700">+{money(point.assetWithdrawal)}</b>
         </div>
         {point.assetWithdrawalDetails.length > 0 && (
@@ -305,14 +500,21 @@ function CashflowChartTooltip({
           </p>
         )}
         <div className="flex justify-between gap-4 rounded-md bg-blue-50 px-2 py-1.5">
-          <span className="font-black text-blue-950">⑤ 생활비로 쓸 수 있는 현금</span>
+          <span className="font-black text-blue-950">
+            ⑥ 생활비로 쓸 수 있는 현금
+          </span>
           <b className="text-blue-700">{money(point.actual)}</b>
         </div>
         <p className="pl-3 text-[11px] text-slate-500">
-          남은 운용자산 {money(point.remainingRetirementAssets)} · 새 거주주택{' '}
+          현금·금융자산 잔액 {money(point.cashAndFinancialAssetBalance)} · 생활비
+          인출계획 잔액 {money(point.remainingRetirementAssets)} · 새 거주주택{' '}
           {money(point.replacementHousingValue)} · 그해 재투자수익{' '}
           {money(point.assetReinvestedReturn)}
         </p>
+        <div className="flex justify-between gap-4 rounded-md bg-teal-50 px-2 py-1.5 text-teal-900">
+          <span className="font-black">현재 현금·금융자산 잔액</span>
+          <b>{money(point.cashAndFinancialAssetBalance)}</b>
+        </div>
         {point.assetTransactionDetails.map((detail) => (
           <div
             key={`${detail.assetId}-${detail.transactionKind}`}
@@ -325,7 +527,18 @@ function CashflowChartTooltip({
                   ? `${detail.soldAssetName} 매각 → ${detail.purchasedAssetName ?? '새 주택'} 구입`
                   : `${detail.purchasedAssetName ?? '새 주택'} 구입`}
             </b>
-            : 매각·대기자금 {money(detail.saleProceeds)}
+            :{' '}
+            {detail.saleProceedsBeforeDebtPayoff != null
+              ? '비용·세금 차감 후 매각대금'
+              : '매각·대기자금'}{' '}
+            {money(detail.saleProceedsBeforeDebtPayoff ?? detail.saleProceeds)}
+            {(detail.linkedDebtPayoff ?? 0) > 0 && (
+              <>
+                {' '}
+                - 연결대출 상환 {money(detail.linkedDebtPayoff ?? 0)} = 상환 후{' '}
+                {money(detail.saleProceeds)}
+              </>
+            )}
             {detail.purchaseCost != null && (
               <> - 구입비용 {money(detail.purchaseCost)}</>
             )}
@@ -335,10 +548,50 @@ function CashflowChartTooltip({
             {detail.fundingShortfall > 0 && (
               <> · 별도 조달 필요 {money(detail.fundingShortfall)}</>
             )}
+            {(detail.debtPayoffFundingShortfall ?? 0) > 0 && (
+              <>
+                {' '}
+                · 대출상환 별도자금 필요{' '}
+                {money(detail.debtPayoffFundingShortfall ?? 0)}
+              </>
+            )}
+            {(detail.linkedDebtPayoffDetails?.length ?? 0) > 0 && (
+              <small className="mt-1 block text-[11px] font-normal text-rose-800">
+                {detail.linkedDebtPayoffDetails
+                  ?.map((debt) => `${debt.name} ${money(debt.amount)}`)
+                  .join(' · ')}
+              </small>
+            )}
+            {(detail.saleBrokerage != null ||
+              detail.capitalGainsTaxes != null ||
+              detail.purchaseBrokerage != null ||
+              detail.acquisitionTaxes != null) && (
+              <small className="mt-1 block text-[11px] font-normal text-violet-800">
+                {[
+                  detail.saleBrokerage != null
+                    ? `매도 중개보수 ${money(detail.saleBrokerage)}`
+                    : '',
+                  detail.capitalGainsTaxes != null
+                    ? `양도세·지방세 ${money(detail.capitalGainsTaxes)}`
+                    : '',
+                  detail.purchaseBrokerage != null
+                    ? `매수 중개보수 ${money(detail.purchaseBrokerage)}`
+                    : '',
+                  detail.acquisitionTaxes != null
+                    ? `취득 관련 세금 ${money(detail.acquisitionTaxes)}`
+                    : '',
+                ]
+                  .filter(Boolean)
+                  .join(' · ')}
+                {detail.roughEstimatePolicyId
+                  ? ` · ${detail.roughEstimatePolicyId} 참고 추정`
+                  : ''}
+              </small>
+            )}
           </div>
         ))}
         <div className="flex justify-between gap-4">
-          <span className="font-bold text-slate-700">⑥ {livingCostLegend}</span>
+          <span className="font-bold text-slate-700">⑦ {livingCostLegend}</span>
           <b className="text-orange-700">-{money(point.essential)}</b>
         </div>
         <div
@@ -346,7 +599,7 @@ function CashflowChartTooltip({
             balance < 0 ? 'text-rose-800' : 'text-emerald-800'
           }`}
         >
-          <span className="font-black">⑦ 생활비 후 최종 차이</span>
+          <span className="font-black">⑧ 생활비 후 최종 차이</span>
           <b>
             {balance < 0
               ? `-${money(Math.abs(balance))}`
@@ -2596,6 +2849,91 @@ function Metric({
   );
 }
 
+type SummaryTableRow = {
+  group: string;
+  item: string;
+  value: string;
+  note: string;
+  tone?: 'default' | 'danger' | 'success';
+};
+
+const cashflowWarningLabels: Record<string, string> = {
+  DEBT_SERVICE_MISSING: '대출 상환정보 미입력',
+  RENTAL_NET_INCOME_PARTIAL: '임대 순수입 부분 추정',
+  SURVIVOR_LIVING_COST_UNCHANGED: '첫 사망 후 생활비 확인',
+  TAX_ESTIMATE_PARTIAL: '연금 세금 부분 추정',
+  ASSET_USE_NOT_CONVERTIBLE: '자산 현금화 계획 확인',
+  LINKED_DEBT_ASSET_MISSING: '대출 연결 자산 확인',
+  LINKED_DEBT_SALE_NOT_SCHEDULED: '연결 자산 매각연도 확인',
+  LINKED_DEBT_PAYOFF_SHORTFALL: '매각대금 대비 대출잔액 부족',
+  HOUSING_PURCHASE_BEFORE_SALE: '주택 구입·매각 순서 확인',
+  HOUSING_PURCHASE_FUNDING_SHORTFALL: '새 주택 구입자금 부족',
+  REAL_ESTATE_COST_ROUGH_ESTIMATE: '부동산 세금·중개보수 참고 추정',
+};
+
+function SummaryTable({
+  rows,
+  valueHeading = '금액·상태',
+}: {
+  rows: SummaryTableRow[];
+  valueHeading?: string;
+}) {
+  return (
+    <div className="min-w-0 max-w-full overflow-x-auto rounded-xl border border-slate-200 bg-white">
+      <Table className="min-w-[760px]">
+        <TableHeader>
+          <TableRow className="bg-slate-100">
+            <TableHead className="w-36 font-black text-slate-800">
+              구분
+            </TableHead>
+            <TableHead className="w-56 font-black text-slate-800">
+              항목
+            </TableHead>
+            <TableHead className="w-52 text-right font-black text-slate-800">
+              {valueHeading}
+            </TableHead>
+            <TableHead className="font-black text-slate-800">
+              계산 의미
+            </TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {rows.map((row, index) => {
+            const previousGroup = rows[index - 1]?.group;
+            return (
+              <TableRow
+                key={`${row.group}-${row.item}`}
+                className={previousGroup !== row.group ? 'border-t-2' : ''}
+              >
+                <TableCell className="font-black text-slate-700">
+                  {previousGroup === row.group ? '' : row.group}
+                </TableCell>
+                <TableCell className="font-semibold text-slate-800">
+                  {row.item}
+                </TableCell>
+                <TableCell
+                  className={`whitespace-nowrap text-right text-base font-black ${
+                    row.tone === 'danger'
+                      ? 'text-rose-800'
+                      : row.tone === 'success'
+                        ? 'text-emerald-700'
+                        : 'text-blue-700'
+                  }`}
+                >
+                  {row.value}
+                </TableCell>
+                <TableCell className="text-xs leading-5 text-slate-600">
+                  {row.note}
+                </TableCell>
+              </TableRow>
+            );
+          })}
+        </TableBody>
+      </Table>
+    </div>
+  );
+}
+
 function HouseholdRetirementSettings({
   people,
   setPerson,
@@ -2805,6 +3143,10 @@ function IncomeEventTimeline({
           const purchaseText = detail.purchasedAssetName
             ? `${detail.purchasedAssetName} 구입비용 ${money(detail.purchaseCost ?? 0)}, 구입 후 운용 가능 잔여금 ${money(detail.investableSurplus)}`
             : `순매각대금 ${money(detail.saleProceeds)}`;
+          const debtPayoffText =
+            (detail.linkedDebtPayoff ?? 0) > 0
+              ? `, 연결대출 ${money(detail.linkedDebtPayoff ?? 0)} 자동상환 후 금액`
+              : '';
           return {
             id: `asset-transaction-${row.year}-${detail.assetId}-${index}`,
             year: row.year,
@@ -2816,7 +3158,7 @@ function IncomeEventTimeline({
                 ? `${detail.soldAssetName} 매각 → ${detail.purchasedAssetName} 구입`
                 : `${detail.purchasedAssetName} 구입`
               : `${detail.soldAssetName} 매각`,
-            description: `${purchaseText}${detail.fundingShortfall > 0 ? `, 별도 조달 필요액 ${money(detail.fundingShortfall)}` : ''}`,
+            description: `${purchaseText}${debtPayoffText}${detail.fundingShortfall > 0 ? `, 별도 조달 필요액 ${money(detail.fundingShortfall)}` : ''}${(detail.debtPayoffFundingShortfall ?? 0) > 0 ? `, 대출상환 별도자금 ${money(detail.debtPayoffFundingShortfall ?? 0)} 필요` : ''}`,
           };
         },
       );
@@ -2836,6 +3178,28 @@ function IncomeEventTimeline({
   const [selectedEventId, setSelectedEventId] = useState(
     eventGroups[0]?.id ?? '',
   );
+  const [pinnedTooltipYear, setPinnedTooltipYear] = useState<number | null>(
+    null,
+  );
+  const pinnedTooltipPoint =
+    pinnedTooltipYear == null
+      ? null
+      : (chartData.find((point) => point.year === pinnedTooltipYear) ?? null);
+  useEffect(() => {
+    if (pinnedTooltipYear == null) return;
+    const releasePinnedTooltip = (event: PointerEvent) => {
+      const target = event.target;
+      if (
+        target instanceof Element &&
+        target.closest('[data-cashflow-tooltip-pinned="true"]')
+      )
+        return;
+      setPinnedTooltipYear(null);
+    };
+    document.addEventListener('pointerdown', releasePinnedTooltip);
+    return () =>
+      document.removeEventListener('pointerdown', releasePinnedTooltip);
+  }, [pinnedTooltipYear]);
   const visibleSelectedYear = Math.min(
     endYear,
     Math.max(startYear, selectedYear),
@@ -2880,11 +3244,14 @@ function IncomeEventTimeline({
     if (event) setSelectedEventId(event.id);
   };
   return (
-    <section className="rounded-xl border-2 border-emerald-200 bg-emerald-50/60 p-4 shadow-sm">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
+    <section
+      data-print-section="cashflow-chart"
+      className="min-w-0 max-w-full overflow-visible rounded-xl border-2 border-emerald-200 bg-emerald-50/60 p-4 shadow-sm"
+    >
+      <div className="grid min-w-0 max-w-full gap-3">
+        <div className="min-w-0">
           <h3 className="text-lg font-black text-emerald-950">
-            연도별 소득·생활비와 주요 사건 통합 분석
+            2. 연도별 소득·생활비·현금자산 통합 분석
           </h3>
           <p className="mt-1 text-xs leading-5 text-emerald-800">
             위 그래프의 소득·생활비 차이와 아래 사건 설명은 같은 연도 데이터를
@@ -2892,7 +3259,10 @@ function IncomeEventTimeline({
             표시됩니다.
           </p>
         </div>
-        <Badge className="bg-emerald-700 px-3 py-1 text-white">
+        <Badge
+          data-print="hide"
+          className="w-fit max-w-full bg-emerald-700 px-3 py-1 text-white"
+        >
           {visibleSelectedYear}년 · {result.a.name}{' '}
           {selectedCashflow?.ageA ?? selectedSnapshot.ageA}세
           {(selectedCashflow?.ageB ?? selectedSnapshot.ageB) == null
@@ -2900,35 +3270,68 @@ function IncomeEventTimeline({
             : ` · ${result.b?.name ?? '배우자'} ${selectedCashflow?.ageB ?? selectedSnapshot.ageB}세`}
         </Badge>
       </div>
-      <div className="mt-4 rounded-xl border border-emerald-100 bg-white p-4">
+      <div
+        data-print-block="cashflow-chart"
+        className="mt-4 min-w-0 max-w-full overflow-visible rounded-xl border border-emerald-100 bg-white p-4"
+      >
         <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
           <div>
             <h4 className="font-black text-slate-950">
-              나이별 월 가구 현금흐름과 생활비 차이
+              연도·부부 나이별 월 가구 현금흐름과 생활비 차이
             </h4>
             <p className="mt-1 text-xs text-slate-500">
-              파란선은 총소득에서 그해 대출 원리금을 빼고, 등록한 계획에 따른 자산
-              운용수익과 계획 인출액을 더해 실제 생활비로 쓸 수 있는 월 현금입니다.
-              초록 점선은 현금으로 받는 운용수익, 보라 점선은 자산 원금 인출액,
-              주황 점선은 생활비 기준입니다.
+              파란선은 총소득에서 그해 대출 원리금을 빼고, 등록한 계획에 따른
+              자산 운용수익과 계획 인출액을 더해 실제 생활비로 쓸 수 있는 월
+              현금입니다. 초록 점선은 현금으로 받는 운용수익, 보라 점선은 자산
+              원금 인출액, 주황 점선은 생활비 기준입니다. 진한 청록선은 오른쪽
+              축으로 읽는 현금·금융자산 잔액이며 실거주 중인 주택 가치는
+              포함하지 않습니다.
+            </p>
+            <p
+              data-print="hide"
+              className="mt-2 w-fit rounded-md border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-[11px] font-bold text-emerald-900"
+            >
+              사용법: 선 위에서 움직여 확인하고, 원하는 연도를 클릭하면 상세창이
+              고정되어 안쪽을 스크롤할 수 있습니다. 바깥을 클릭하면 고정이
+              해제됩니다.
             </p>
           </div>
-          <Badge variant="outline">단위: 월 원</Badge>
+          <div className="flex flex-wrap items-center gap-3 text-[11px] font-bold">
+            <span className="flex items-center gap-1 text-blue-700">
+              <span className="h-2.5 w-2.5 rounded-full bg-blue-600" /> 본인 나이
+            </span>
+            <span className="flex items-center gap-1 text-violet-700">
+              <span className="h-2.5 w-2.5 rounded-full bg-violet-600" /> 배우자 나이
+            </span>
+            <Badge variant="outline">단위: 월 원</Badge>
+          </div>
         </div>
-        <div className="h-[360px] min-w-0">
+        <div
+          data-print="chart-canvas"
+          className="relative z-10 h-[420px] w-full min-w-0 max-w-full overflow-visible"
+        >
           <ResponsiveContainer width="100%" height="100%">
             <ComposedChart
               data={chartData}
-              margin={{ top: 14, right: 18, left: 16, bottom: 8 }}
+              margin={{ top: 14, right: 30, left: 16, bottom: 34 }}
+              onClick={(state) => {
+                const index = Number(state.activeTooltipIndex);
+                if (Number.isInteger(index) && chartData[index])
+                  setPinnedTooltipYear(chartData[index].year);
+              }}
             >
               <CartesianGrid strokeDasharray="3 3" stroke="#dbe3ec" />
               <XAxis
-                dataKey="label"
-                minTickGap={22}
-                tick={{ fontSize: 11 }}
+                dataKey="year"
+                minTickGap={46}
+                height={48}
+                tick={(props) => (
+                  <CashflowYearAgeTick {...props} chartData={chartData} />
+                )}
                 axisLine={{ stroke: '#94a3b8' }}
               />
               <YAxis
+                yAxisId="monthly"
                 width={72}
                 tick={{ fontSize: 11 }}
                 tickFormatter={(value) =>
@@ -2938,7 +3341,22 @@ function IncomeEventTimeline({
                 }
                 axisLine={{ stroke: '#94a3b8' }}
               />
+              <YAxis
+                yAxisId="assets"
+                orientation="right"
+                width={76}
+                tick={{ fontSize: 10, fill: '#0f766e' }}
+                tickFormatter={(value) =>
+                  value >= 100000000
+                    ? `${(value / 100000000).toFixed(1)}억`
+                    : `${Math.round(value / 10000)}만`
+                }
+                axisLine={{ stroke: '#0f766e' }}
+              />
               <Tooltip
+                active={pinnedTooltipPoint ? false : undefined}
+                allowEscapeViewBox={{ x: false, y: false }}
+                wrapperStyle={{ zIndex: 50, pointerEvents: 'auto' }}
                 content={(props) => (
                   <CashflowChartTooltip
                     active={props.active}
@@ -2949,23 +3367,12 @@ function IncomeEventTimeline({
                     }
                     result={result}
                     livingCostLegend={livingCostLegend}
+                    onPin={(point) => setPinnedTooltipYear(point.year)}
                   />
                 )}
               />
-              <Legend
-                formatter={(value) =>
-                  value === 'actual'
-                    ? '생활비 사용 가능 현금(순소득 + 운용수익 + 자산인출)'
-                    : value === 'assetReturnIncome'
-                      ? '현금으로 받는 자산 운용수익'
-                    : value === 'assetWithdrawal'
-                      ? '계획 자산 원금 인출액'
-                    : value === 'essential'
-                      ? livingCostLegend
-                      : '생활비 기준 부족액'
-                }
-              />
               <Area
+                yAxisId="monthly"
                 type="monotone"
                 dataKey="gap"
                 fill="#fecaca"
@@ -2974,6 +3381,7 @@ function IncomeEventTimeline({
                 strokeWidth={1.5}
               />
               <Line
+                yAxisId="monthly"
                 type="stepAfter"
                 dataKey="assetReturnIncome"
                 stroke="#059669"
@@ -2982,6 +3390,7 @@ function IncomeEventTimeline({
                 dot={false}
               />
               <Line
+                yAxisId="monthly"
                 type="stepAfter"
                 dataKey="assetWithdrawal"
                 stroke="#7c3aed"
@@ -2990,6 +3399,7 @@ function IncomeEventTimeline({
                 dot={false}
               />
               <Line
+                yAxisId="monthly"
                 type="monotone"
                 dataKey="actual"
                 stroke="#2563eb"
@@ -2998,6 +3408,7 @@ function IncomeEventTimeline({
                 activeDot={{ r: 5 }}
               />
               <Line
+                yAxisId="monthly"
                 type="monotone"
                 dataKey="essential"
                 stroke="#d97706"
@@ -3005,8 +3416,18 @@ function IncomeEventTimeline({
                 strokeDasharray="7 5"
                 dot={false}
               />
+              <Line
+                yAxisId="assets"
+                type="monotone"
+                dataKey="cashAndFinancialAssetBalance"
+                stroke="#0f766e"
+                strokeWidth={3}
+                dot={false}
+                activeDot={{ r: 5 }}
+              />
               <ReferenceLine
-                x={`${selectedCashflow?.ageA ?? selectedSnapshot.ageA}세`}
+                yAxisId="monthly"
+                x={visibleSelectedYear}
                 stroke="#047857"
                 strokeWidth={2}
                 strokeDasharray="4 4"
@@ -3020,8 +3441,83 @@ function IncomeEventTimeline({
               />
             </ComposedChart>
           </ResponsiveContainer>
+          {pinnedTooltipPoint && (
+            <div className="absolute right-3 top-3 z-[70]">
+              <CashflowChartTooltip
+                active
+                payload={[{ payload: pinnedTooltipPoint }]}
+                result={result}
+                livingCostLegend={livingCostLegend}
+                pinned
+                onUnpin={() => setPinnedTooltipYear(null)}
+              />
+            </div>
+          )}
+        </div>
+        <div
+          className="mt-3 grid min-w-0 max-w-full grid-cols-1 gap-x-5 gap-y-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 sm:grid-cols-2 xl:grid-cols-3"
+          aria-label="그래프 범례"
+        >
+          {[
+            {
+              label: '생활비 사용 가능 현금(순소득 + 운용수익 + 자산인출)',
+              color: '#2563eb',
+              style: 'solid',
+            },
+            {
+              label: '현금으로 받는 자산 운용수익',
+              color: '#059669',
+              style: 'dashed',
+            },
+            {
+              label: '계획 자산 원금 인출액',
+              color: '#7c3aed',
+              style: 'dashed',
+            },
+            {
+              label: '현금·금융자산 잔액(오른쪽 축)',
+              color: '#0f766e',
+              style: 'solid',
+            },
+            {
+              label: livingCostLegend,
+              color: '#d97706',
+              style: 'dashed',
+            },
+            {
+              label: '생활비 기준 부족액',
+              color: '#ef4444',
+              style: 'area',
+            },
+          ].map((item) => (
+            <div
+              key={item.label}
+              className="flex min-w-0 items-start gap-2 text-[11px] font-bold leading-4 text-slate-700"
+            >
+              {item.style === 'area' ? (
+                <span
+                  className="mt-1 h-2.5 w-5 shrink-0 rounded-sm border"
+                  style={{
+                    borderColor: item.color,
+                    backgroundColor: '#fecaca',
+                  }}
+                />
+              ) : (
+                <span
+                  className="mt-2 w-5 shrink-0 border-t-2"
+                  style={{
+                    borderColor: item.color,
+                    borderTopStyle:
+                      item.style === 'dashed' ? 'dashed' : 'solid',
+                  }}
+                />
+              )}
+              <span className="min-w-0 break-words">{item.label}</span>
+            </div>
+          ))}
         </div>
       </div>
+      <div data-print="hide">
       <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
         <h4 className="font-black text-emerald-950">연도와 소득 사건 선택</h4>
         <span className="text-xs text-emerald-800">
@@ -3092,7 +3588,7 @@ function IncomeEventTimeline({
           )}
           note={
             selectedCashflow
-              ? `근로 ${money(selectedCashflow.employmentIncome)} + 연금 ${money(selectedCashflow.nationalPension + selectedCashflow.basicPension + selectedCashflow.privatePension)} + 임대·기타 ${money(selectedCashflow.rentalIncomeNet + selectedCashflow.otherIncome)} - 부채상환 ${money(selectedCashflow.debtService)} + 운용수익 ${money(selectedCashflow.assetReturnIncome)} + 자산인출 ${money(selectedCashflow.assetWithdrawal)} · 남은 운용자산 ${money(selectedCashflow.remainingRetirementAssets)}`
+              ? `근로 ${money(selectedCashflow.employmentIncome)} + 연금 ${money(selectedCashflow.nationalPension + selectedCashflow.basicPension + selectedCashflow.privatePension)} + 임대·기타 ${money(selectedCashflow.rentalIncomeNet + selectedCashflow.otherIncome)} - 부채상환 ${money(selectedCashflow.debtService)} + 운용수익 ${money(selectedCashflow.assetReturnIncome)} + 자산인출 ${money(selectedCashflow.assetWithdrawal)} · 현금·금융자산 잔액 ${money(selectedCashflow.cashAndFinancialAssetBalance)} · 생활비 인출계획 잔액 ${money(selectedCashflow.remainingRetirementAssets)}`
               : `근로 ${money(selectedSnapshot.employmentA + selectedSnapshot.employmentB)} + 연금 ${money(selectedSnapshot.pensionNetA + selectedSnapshot.pensionNetB)}`
           }
         />
@@ -3154,12 +3650,12 @@ function IncomeEventTimeline({
           value={visibleSelectedEventId}
           onValueChange={selectEvent}
         >
-          <TabsList className="h-auto w-full justify-start gap-1 overflow-x-auto bg-white p-1">
+          <TabsList className="grid h-auto w-full min-w-0 max-w-full grid-cols-1 gap-1 bg-white p-1 sm:grid-cols-2 xl:grid-cols-4">
             {eventGroups.map((group) => (
               <TabsTrigger
                 key={group.id}
                 value={group.id}
-                className="h-auto min-w-fit flex-col gap-0.5 px-3 py-2"
+                className="h-auto w-full min-w-0 flex-col gap-0.5 whitespace-normal px-3 py-2"
               >
                 <span className="font-black">{group.year}년</span>
                 <span className="text-[10px]">{group.title}</span>
@@ -3195,8 +3691,8 @@ function IncomeEventTimeline({
                 value={group.id}
                 className="rounded-xl border border-emerald-200 bg-white p-4"
               >
-                <div className="flex flex-wrap items-start justify-between gap-2">
-                  <div>
+                <div className="grid min-w-0 gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+                  <div className="min-w-0">
                     <h4 className="text-lg font-black text-slate-950">
                       {group.year}년 ({result.a.name} {snapshot.ageA}세
                       {snapshot.ageB == null
@@ -3292,8 +3788,8 @@ function IncomeEventTimeline({
                 <p className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
                   {group.year}년 생활비{' '}
                   {money(cashflow?.livingCost ?? snapshot.livingCost)} 대비 그해
-                  월 부채상환을 빼고 운용수익·계획 자산인출을 더한 생활비 사용 가능
-                  현금{' '}
+                  월 부채상환을 빼고 운용수익·계획 자산인출을 더한 생활비 사용
+                  가능 현금{' '}
                   {money(
                     cashflow?.householdCashAvailableAfterAsset ??
                       snapshot.householdIncome,
@@ -3310,6 +3806,7 @@ function IncomeEventTimeline({
           })}
         </Tabs>
       )}
+      </div>
     </section>
   );
 }
@@ -3457,7 +3954,7 @@ function PensionGoalReport({
   if (goals.length === 0) return null;
 
   return (
-    <Card className="border-emerald-200">
+    <Card className="w-full min-w-0 max-w-full border-emerald-200">
       <CardHeader className="border-b border-emerald-100 bg-emerald-50/60">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
@@ -3475,7 +3972,7 @@ function PensionGoalReport({
           </Badge>
         </div>
       </CardHeader>
-      <CardContent className="grid gap-5 pt-5">
+      <CardContent className="grid min-w-0 max-w-full gap-5 pt-5 [&>*]:min-w-0 [&>*]:max-w-full">
         {plan.errors.length > 0 && (
           <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800">
             {plan.errors.map((error) => (
@@ -3695,7 +4192,7 @@ function PensionGoalReport({
         )}
         <section className="rounded-xl border border-slate-200 bg-white p-4">
           <div className="mb-4 flex flex-wrap items-end justify-between gap-2">
-            <div>
+            <div className="min-w-0 flex-1">
               <h3 className="font-black">나이별 세후 월소득 흐름</h3>
               <p className="mt-1 text-xs text-slate-500">
                 근로소득과 국민·개인·퇴직연금을 합산하여 목표, 부족액과 국가
@@ -4001,6 +4498,115 @@ function PensionGoalReport({
 }
 */
 
+function PensionCompositionSummary({
+  result,
+  basicPensionMonthly,
+}: {
+  result: SimulationResult;
+  basicPensionMonthly: number;
+}) {
+  return (
+    <section className="rounded-xl border-2 border-violet-200 bg-violet-50/50 p-5">
+      <div>
+        <h3 className="text-lg font-black text-violet-950">4. 연금 구성 상세</h3>
+        <p className="mt-1 text-xs leading-5 text-violet-800">
+          다음 생활비 부족 분석에 들어가는 부부 생존 시 월 연금과 첫 사망 후
+          전환액을 먼저 확인합니다.
+        </p>
+      </div>
+      <div className="mt-4">
+        <SummaryTable
+          valueHeading="예상 금액"
+          rows={[
+            {
+              group: '부부 생존 시 월액',
+              item: '국민연금',
+              value: money(result.bothAliveNationalMonthly),
+              note: '두 사람의 선택한 수령 전략 합계',
+            },
+            {
+              group: '부부 생존 시 월액',
+              item: '기초연금',
+              value: money(basicPensionMonthly),
+              note: '두 사람 모두 65세 이상이고 수급한다고 가정한 시점',
+            },
+            {
+              group: '부부 생존 시 월액',
+              item: '개인·퇴직연금',
+              value: money(result.bothAliveAdditionalMonthly),
+              note: '모든 등록 계좌의 해당 시점 합계',
+            },
+            {
+              group: '부부 생존 시 월액',
+              item: '전체 연금 합계',
+              value: money(result.bothAliveMonthly),
+              note: '국민연금 + 기초연금 + 개인·퇴직연금',
+            },
+            {
+              group: '세금 반영 후',
+              item:
+                result.overallTaxEstimateStatus === 'complete'
+                  ? '예상 세후 월 합계'
+                  : result.overallTaxEstimateStatus === 'partial'
+                    ? '세후 부분 추정 월 합계'
+                    : '세금 미반영 항목 포함 합계',
+              value: money(result.estimatedBothAliveNetMonthly),
+              note: `세금 추정 상태: ${result.overallTaxEstimateStatus}`,
+              tone:
+                result.overallTaxEstimateStatus === 'complete'
+                  ? ('success' as const)
+                  : ('danger' as const),
+            },
+            ...(result.afterFirstDeath
+              ? [
+                  {
+                    group: `첫 사망 후 · ${result.afterFirstDeath.year}년`,
+                    item: '생존자 국민연금 선택액',
+                    value: money(result.afterFirstDeath.selectedNationalPension),
+                    note: result.afterFirstDeath.decisionText,
+                  },
+                  {
+                    group: `첫 사망 후 · ${result.afterFirstDeath.year}년`,
+                    item: '생존자 기초연금',
+                    value: money(result.afterFirstDeath.basicPension),
+                    note: '전환연도 수급 자격을 충족한다고 가정',
+                  },
+                  {
+                    group: `첫 사망 후 · ${result.afterFirstDeath.year}년`,
+                    item: '생존자 개인·퇴직연금',
+                    value: money(
+                      result.afterFirstDeath.additionalPrivatePension,
+                    ),
+                    note: '생존자에게 남아 있는 등록 계좌 합계',
+                  },
+                  {
+                    group: `첫 사망 후 · ${result.afterFirstDeath.year}년`,
+                    item: '생존자 전체 연금',
+                    value: money(result.afterFirstDeath.totalNetPension),
+                    note: '국민연금 선택액 + 기초·개인·퇴직연금',
+                  },
+                ]
+              : [
+                  {
+                    group: '첫 사망 후 월액',
+                    item: '생존자 전체 연금',
+                    value: '해당 없음',
+                    note: '배우자를 포함한 경우 계산됩니다.',
+                  },
+                ]),
+            {
+              group: '추가 납부',
+              item: '국민연금 임의계속가입 납부액',
+              value: money(result.totalAdditionalContribution),
+              note: '본인·배우자의 선택한 추가 납부 합계',
+            },
+          ]}
+        />
+      </div>
+    </section>
+  );
+}
+
 function LivingCostIncomeReport({
   result,
   policy,
@@ -4008,6 +4614,7 @@ function LivingCostIncomeReport({
   livingCost,
   householdFinance,
   includeLateLifeGap,
+  basicPensionMonthly,
 }: {
   result: SimulationResult;
   policy: Policy;
@@ -4015,6 +4622,7 @@ function LivingCostIncomeReport({
   livingCost: LivingCostSettings;
   householdFinance: HouseholdFinanceSettings;
   includeLateLifeGap: boolean;
+  basicPensionMonthly: number;
 }) {
   const currentYear = new Date().getFullYear();
   const cashflow = useMemo(
@@ -4053,6 +4661,8 @@ function LivingCostIncomeReport({
         otherIncome: row.otherIncome,
         incomeBeforeDebt: row.householdIncomeBeforeDebt,
         debtService: row.debtService,
+        propertyHoldingTax: row.propertyHoldingTax,
+        propertyHoldingTaxDetails: row.propertyHoldingTaxDetails,
         assetWithdrawal: row.assetWithdrawal,
         assetWithdrawalDetails: row.assetWithdrawalDetails,
         assetReturnIncome: row.assetReturnIncome,
@@ -4060,6 +4670,7 @@ function LivingCostIncomeReport({
         assetReinvestedReturn: row.assetReinvestedReturn,
         assetTransactionDetails: row.assetTransactionDetails,
         remainingRetirementAssets: row.remainingRetirementAssets,
+        cashAndFinancialAssetBalance: row.cashAndFinancialAssetBalance,
         replacementHousingValue: row.replacementHousingValue,
         actual: row.householdCashAvailableAfterAsset,
         essential: row.livingCost,
@@ -4086,8 +4697,233 @@ function LivingCostIncomeReport({
       ? null
       : (cashflow.rows.find((row) => row.year === householdRetirementYear) ??
         null);
+  const firstGapRow = cashflow.firstGapYear
+    ? (cashflow.rows.find((row) => row.year === cashflow.firstGapYear) ?? null)
+    : null;
+  const maximumGapRow = cashflow.rows.reduce<HouseholdCashflowRow | null>(
+    (maximum, row) =>
+      row.monthlyGap > (maximum?.monthlyGap ?? 0) ? row : maximum,
+    null,
+  );
+  const financialMilestones = useMemo(() => {
+    const labelsByYear = new Map<number, Set<string>>();
+    const add = (year: number | null | undefined, label: string) => {
+      if (year == null || !cashflow.rows.some((row) => row.year === year)) return;
+      const labels = labelsByYear.get(year) ?? new Set<string>();
+      labels.add(label);
+      labelsByYear.set(year, labels);
+    };
+    add(currentYear, '현재');
+    if (result.a.employmentIncomeEnabled)
+      add(
+        result.a.birthDate.getFullYear() + (result.a.retirementAge ?? 60),
+        '본인 은퇴',
+      );
+    if (result.b?.employmentIncomeEnabled)
+      add(
+        result.b.birthDate.getFullYear() + (result.b.retirementAge ?? 60),
+        '배우자 은퇴',
+      );
+    add(householdRetirementYear, '가구 은퇴');
+    if (result.a.hasNps) add(result.a.claimYear, '본인 국민연금');
+    if (result.b?.hasNps) add(result.b.claimYear, '배우자 국민연금');
+    return [...labelsByYear.entries()]
+      .sort(([left], [right]) => left - right)
+      .map(([year, labels]) => ({
+        year,
+        labels: [...labels],
+        row: cashflow.rows.find((item) => item.year === year),
+      }))
+      .filter(
+        (milestone): milestone is {
+          year: number;
+          labels: string[];
+          row: HouseholdCashflowRow;
+        } => Boolean(milestone.row),
+      );
+  }, [cashflow.rows, currentYear, householdRetirementYear, result]);
+  const [selectedFinancialMilestoneYear, setSelectedFinancialMilestoneYear] =
+    useState(currentYear);
+  const selectedFinancialMilestoneIndex = Math.max(
+    0,
+    financialMilestones.findIndex(
+      (milestone) => milestone.year === selectedFinancialMilestoneYear,
+    ),
+  );
+  const selectedFinancialMilestone =
+    financialMilestones[selectedFinancialMilestoneIndex] ??
+    financialMilestones[0];
+  const currentCashAndFinancialAssets = householdFinance.assets
+    .filter((asset) => asset.type === 'cash' || asset.type === 'financial')
+    .reduce((sum, asset) => sum + Math.max(0, asset.currentValue), 0);
+  const financialMilestoneRows: {
+    group: '재무상태' | '월 현금흐름';
+    item: string;
+    value: (milestone: (typeof financialMilestones)[number]) => number;
+    display: 'normal' | 'inflow' | 'negative' | 'difference';
+    showAssetBalanceDeduction?: boolean;
+  }[] = [
+    {
+      group: '재무상태',
+      item: '총자산',
+      value: (milestone) =>
+        milestone.year === currentYear
+          ? cashflow.finance.grossAssets
+          : milestone.row.grossAssetBalance,
+      display: 'normal',
+    },
+    {
+      group: '재무상태',
+      item: '총부채',
+      value: (milestone) =>
+        milestone.year === currentYear
+          ? cashflow.finance.liabilities
+          : milestone.row.liabilityBalance,
+      display: 'negative',
+    },
+    {
+      group: '재무상태',
+      item: '순자산',
+      value: (milestone) =>
+        milestone.year === currentYear
+          ? cashflow.finance.netWorth
+          : milestone.row.netWorthBalance,
+      display: 'normal',
+    },
+    {
+      group: '재무상태',
+      item: '현금·금융자산 잔액',
+      value: (milestone) =>
+        milestone.year === currentYear
+          ? currentCashAndFinancialAssets
+          : milestone.row.cashAndFinancialAssetBalance,
+      display: 'normal',
+    },
+    {
+      group: '월 현금흐름',
+      item: '근로·사업소득',
+      value: (milestone) => milestone.row.employmentIncome,
+      display: 'inflow',
+    },
+    {
+      group: '월 현금흐름',
+      item: '국민·기초·개인연금',
+      value: (milestone) =>
+        milestone.row.nationalPension +
+        milestone.row.basicPension +
+        milestone.row.privatePension,
+      display: 'inflow',
+    },
+    {
+      group: '월 현금흐름',
+      item: '임대·기타 반복소득',
+      value: (milestone) =>
+        milestone.row.rentalIncomeNet + milestone.row.otherIncome,
+      display: 'inflow',
+    },
+    {
+      group: '월 현금흐름',
+      item: '대출 원리금',
+      value: (milestone) => milestone.row.debtService,
+      display: 'negative',
+    },
+    {
+      group: '월 현금흐름',
+      item: '부동산 보유세',
+      value: (milestone) => milestone.row.propertyHoldingTax,
+      display: 'negative',
+    },
+    {
+      group: '월 현금흐름',
+      item: '자산 원금 인출',
+      value: (milestone) => milestone.row.assetWithdrawal,
+      display: 'inflow',
+      showAssetBalanceDeduction: true,
+    },
+    {
+      group: '월 현금흐름',
+      item: '현금으로 받는 운용수익',
+      value: (milestone) => milestone.row.assetReturnIncome,
+      display: 'inflow',
+    },
+    {
+      group: '월 현금흐름',
+      item: '생활비 사용 가능 현금',
+      value: (milestone) => milestone.row.householdCashAvailableAfterAsset,
+      display: 'normal',
+    },
+    {
+      group: '월 현금흐름',
+      item: '생활비 기준',
+      value: (milestone) => milestone.row.livingCost,
+      display: 'negative',
+    },
+    {
+      group: '월 현금흐름',
+      item: '생활비 후 월 차이',
+      value: (milestone) =>
+        milestone.row.monthlySurplus - milestone.row.monthlyGap,
+      display: 'difference',
+    },
+  ];
+  const assetFundingPlans = useMemo(
+    () =>
+      cashflow.gapPeriodsBeforeAssets.map((period) => {
+        const rows = cashflow.rows.filter(
+          (row) => row.year >= period.startYear && row.year <= period.endYear,
+        );
+        const firstRow = rows[0];
+        const lastRow = rows.at(-1);
+        const withdrawalRows = rows.filter((row) => row.assetWithdrawal > 0);
+        const firstWithdrawalRow = withdrawalRows[0];
+        const lastWithdrawalRow = withdrawalRows.at(-1);
+        const sourceTotals = new Map<string, number>();
+        for (const row of withdrawalRows) {
+          for (const detail of row.assetWithdrawalDetails) {
+            sourceTotals.set(
+              detail.name,
+              (sourceTotals.get(detail.name) ?? 0) + detail.amount * 12,
+            );
+          }
+        }
+        const totalNeed = rows.reduce(
+          (sum, row) => sum + row.monthlyGapBeforeAsset * 12,
+          0,
+        );
+        const totalWithdrawal = rows.reduce(
+          (sum, row) => sum + row.assetWithdrawal * 12,
+          0,
+        );
+        const residualRows = rows.filter((row) => row.monthlyGap > 0);
+        return {
+          ...period,
+          firstRow,
+          lastRow,
+          firstWithdrawalRow,
+          lastWithdrawalRow,
+          sources: [...sourceTotals.entries()].map(([name, total]) => ({
+            name,
+            total,
+          })),
+          totalNeed,
+          totalWithdrawal,
+          coverageRate:
+            totalNeed > 0
+              ? Math.min(100, Math.round((totalWithdrawal / totalNeed) * 100))
+              : 0,
+          maximumWithdrawal: withdrawalRows.length
+            ? Math.max(...withdrawalRows.map((row) => row.assetWithdrawal))
+            : 0,
+          firstResidualYear: residualRows[0]?.year ?? null,
+          maximumResidual: residualRows.length
+            ? Math.max(...residualRows.map((row) => row.monthlyGap))
+            : 0,
+        };
+      }),
+    [cashflow.gapPeriodsBeforeAssets, cashflow.rows],
+  );
   return (
-    <Card className="border-emerald-200">
+    <Card className="w-full min-w-0 max-w-full border-emerald-200">
       <CardHeader className="border-b border-emerald-100 bg-emerald-50/50">
         <CardTitle>생활비 대비 실제 예상소득 분석</CardTitle>
         <CardDescription>
@@ -4096,7 +4932,77 @@ function LivingCostIncomeReport({
           않습니다.
         </CardDescription>
       </CardHeader>
-      <CardContent className="grid gap-5 pt-5">
+      <CardContent className="grid min-w-0 max-w-full gap-5 pt-5 [&>*]:min-w-0 [&>*]:max-w-full">
+        <section className="rounded-xl border-2 border-blue-300 bg-blue-50/70 p-5 shadow-sm">
+          <div className="grid min-w-0 gap-3">
+            <div className="min-w-0">
+              <p className="text-xs font-black tracking-wide text-blue-700">
+                1. 먼저 보는 결론
+              </p>
+              <h3 className="mt-1 text-xl font-black text-blue-950">
+                언제 무엇이 필요한가
+              </h3>
+            </div>
+            <Badge
+              className={`w-fit max-w-full ${firstGapRow ? 'bg-rose-800' : 'bg-emerald-700'}`}
+            >
+              {firstGapRow
+                ? `${firstGapRow.year}년 첫 부족`
+                : '분석기간 생활비 기준 충족'}
+            </Badge>
+          </div>
+          {firstGapRow ? (
+            <div className="mt-4 grid gap-3 lg:grid-cols-3">
+              <div className="rounded-xl border border-blue-200 bg-white p-4">
+                <p className="text-xs font-bold text-slate-500">첫 부족 시점</p>
+                <p className="mt-1 text-lg font-black text-rose-900">
+                  {firstGapRow.year}년 · 본인 {firstGapRow.ageA}세
+                  {firstGapRow.ageB == null
+                    ? ''
+                    : ` · 배우자 ${firstGapRow.ageB}세`}
+                </p>
+                <p className="mt-2 text-sm text-slate-700">
+                  생활비 대비 월 <b>-{money(firstGapRow.monthlyGap)}</b>
+                </p>
+              </div>
+              <div className="rounded-xl border border-blue-200 bg-white p-4">
+                <p className="text-xs font-bold text-slate-500">
+                  등록 자산 사용 후 필요한 재원
+                </p>
+                <p className="mt-1 text-lg font-black text-blue-800">
+                  {money(cashflow.exactGapPresentValueAfterAssets)}
+                </p>
+                <p className="mt-2 text-sm text-slate-700">
+                  {cashflow.baseYear}년 현재가치 · 첫 부족 시 현금·금융자산{' '}
+                  <b>{money(firstGapRow.cashAndFinancialAssetBalance)}</b>
+                </p>
+              </div>
+              <div className="rounded-xl border border-blue-200 bg-white p-4">
+                <p className="text-xs font-bold text-slate-500">지금부터의 준비안</p>
+                <p className="mt-1 text-lg font-black text-blue-800">
+                  {firstGapRow.year > currentYear &&
+                  cashflow.suggestedMonthlyContribution > 0
+                    ? `월 ${money(cashflow.suggestedMonthlyContribution)} 적립 비교`
+                    : '즉시 소득·지출·자산 계획 재조정'}
+                </p>
+                <p className="mt-2 text-sm leading-6 text-slate-700">
+                  최대 부족은{' '}
+                  {maximumGapRow
+                    ? `${maximumGapRow.year}년 (본인 ${maximumGapRow.ageA}세${maximumGapRow.ageB == null ? '' : ` · 배우자 ${maximumGapRow.ageB}세`}) 월 -${money(maximumGapRow.monthlyGap)}`
+                    : '없음'}
+                  입니다.
+                </p>
+              </div>
+            </div>
+          ) : (
+            <p className="mt-4 rounded-xl border border-emerald-200 bg-white p-4 text-sm font-bold leading-6 text-emerald-900">
+              현재 입력과 자산 사용 계획에서는 마지막 생존 시점까지 선택한 생활비
+              기준을 충족합니다. 아래 사건별 표에서 은퇴·연금 개시 때의 반복소득과
+              현금·금융자산 잔액 변화를 확인하세요.
+            </p>
+          )}
+        </section>
+
         <IncomeEventTimeline
           result={result}
           policy={policy}
@@ -4107,22 +5013,23 @@ function LivingCostIncomeReport({
         />
 
         <section className="rounded-xl border-2 border-slate-200 bg-slate-50/60 p-5">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
+          <div className="grid min-w-0 max-w-full gap-3">
+            <div className="min-w-0">
               <h3 className="text-lg font-black text-slate-950">
-                자산·부채와 반복소득 요약
+                3. 주요 사건별 자산·부채·소득 통합 비교
               </h3>
               <p className="mt-1 text-xs leading-5 text-slate-600">
-                순자산과 생활비에 실제 사용할 수 있는 자산은 다르게 계산합니다.
-                실거주 주택은 매각 계획이 없으면 은퇴 활용 가능 자산에서
-                제외됩니다.
+                현재, 각자 은퇴, 가구 은퇴와 연금 개시 시점의 재무상태와 월
+                현금흐름을 사건 탭으로 바꾸어 확인합니다. 실거주 주택은
+                총자산에는 포함하지만 매각 계획이 없으면 생활비에 쓸 현금에서는
+                제외합니다.
               </p>
             </div>
             <Badge
               className={
                 cashflow.finance.completeness.debtService === 'incomplete'
-                  ? 'bg-rose-700'
-                  : 'bg-emerald-700'
+                  ? 'w-fit max-w-full bg-rose-700'
+                  : 'w-fit max-w-full bg-emerald-700'
               }
             >
               현금흐름 완성도{' '}
@@ -4131,103 +5038,346 @@ function LivingCostIncomeReport({
                 : '계산 가능'}
             </Badge>
           </div>
-          <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-            <Metric
-              label="총자산"
-              value={money(cashflow.finance.grossAssets)}
-              note={`실거주 주택 ${money(cashflow.finance.primaryHomeValue)} 포함`}
-            />
-            <Metric
-              label="총부채"
-              value={`-${money(cashflow.finance.liabilities)}`}
-              note={`기준연도 월 상환 반영 ${money(cashflow.finance.monthlyDebtServiceAtBaseYear)}`}
-              tone={cashflow.finance.liabilities > 0 ? 'danger' : 'default'}
-            />
-            <Metric
-              label="순자산"
-              value={money(cashflow.finance.netWorth)}
-              note="총자산 - 총부채"
-            />
-            <Metric
-              label="은퇴 활용 가능 자산"
-              value={money(cashflow.finance.retirementAvailableAssets)}
-              note="생활비 사용 계획과 현금화 시점이 지정된 현재 자산가치"
-            />
+          <div
+            className="mt-4 grid min-w-0 max-w-full grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3"
+            role="tablist"
+            aria-label="재무상태를 확인할 주요 사건"
+          >
+            {financialMilestones.map((milestone) => {
+              const selected =
+                milestone.year === selectedFinancialMilestone?.year;
+              return (
+                <button
+                  key={milestone.year}
+                  type="button"
+                  role="tab"
+                  aria-selected={selected}
+                  className={`min-w-0 rounded-lg border px-3 py-2 text-left transition ${
+                    selected
+                      ? 'border-blue-600 bg-blue-700 text-white shadow-sm'
+                      : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-100'
+                  }`}
+                  onClick={() =>
+                    setSelectedFinancialMilestoneYear(milestone.year)
+                  }
+                >
+                  <b className="block break-words text-sm">
+                    {milestone.labels.join(' · ')}
+                  </b>
+                  <span
+                    className={`mt-1 block break-words text-[11px] ${
+                      selected ? 'text-blue-100' : 'text-slate-500'
+                    }`}
+                  >
+                    {milestone.year}년 · 본인 {milestone.row.ageA}세
+                    {milestone.row.ageB == null
+                      ? ''
+                      : ` · 배우자 ${milestone.row.ageB}세`}
+                  </span>
+                </button>
+              );
+            })}
           </div>
-          <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
-            <Metric
-              label="기준연도 임대 순수입"
-              value={money(cashflow.finance.monthlyRentalIncomeNetAtBaseYear)}
-              note={`세전 임대료 ${money(cashflow.finance.monthlyRentalIncomeGrossAtBaseYear)} · ${cashflow.finance.completeness.rentalNetIncome === 'partial' ? '비용·세금 일부 미입력' : '입력 항목 차감 완료'}`}
-            />
-            <Metric
-              label="기준연도 기타 반복소득"
-              value={money(cashflow.finance.monthlyOtherIncomeAtBaseYear)}
-              note="등록한 사업·기타 반복소득"
-            />
-            <Metric
-              label="연금 세금 반영 상태"
-              value={
-                result.overallTaxEstimateStatus === 'complete'
-                  ? '세후 추정 완료'
-                  : result.overallTaxEstimateStatus === 'unknown'
-                    ? '세금 미반영 항목 있음'
-                    : '세후 부분 추정'
-              }
-              note="퇴직소득세 등 입력 여부 기준"
-              tone={
-                result.overallTaxEstimateStatus === 'complete'
-                  ? 'default'
-                  : 'danger'
-              }
-            />
-            <Metric
-              label="계획 기간 총 자산인출"
-              value={money(cashflow.finance.plannedAssetWithdrawals)}
-              note="매각·운용수익을 반영해 연도별 생활비에 실제 투입한 합계"
-            />
-            <Metric
-              label="마지막 분석연도 남은 활용자산"
-              value={money(cashflow.finance.remainingPlannedAssetsAtEnd)}
-              note="보유만 하기로 한 자산은 제외"
-            />
-          </div>
-          {householdFinance.assets.some(
-            (asset) => asset.housingMovePlan?.enabled,
-          ) && (
-            <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
-              <Metric
-                label="주택 교체 후 생성된 운용자금"
-                value={money(cashflow.finance.housingMoveInvestableSurplus)}
-                note="예상 매각대금 - 새 주택 가격·취득비용"
-              />
-              <Metric
-                label="새 주택 구입 별도 필요자금"
-                value={money(cashflow.finance.housingPurchaseFundingShortfall)}
-                note="매각대금보다 구입비용이 큰 경우의 일시 부족액"
-                tone={
-                  cashflow.finance.housingPurchaseFundingShortfall > 0
-                    ? 'danger'
-                    : 'default'
-                }
-              />
-              <Metric
-                label="마지막 분석연도 새 주택 가치"
-                value={money(cashflow.finance.replacementHousingValueAtEnd)}
-                note="입력한 새 주택 연 가치변동률 반영"
-              />
-              <Metric
-                label="현금으로 받은 운용수익 합계"
-                value={money(cashflow.finance.plannedAssetReturnIncome)}
-                note="생활비 사용 가능 현금에 포함"
-              />
-              <Metric
-                label="운용수익 재투자 합계"
-                value={money(cashflow.finance.plannedAssetReinvestedReturns)}
-                note="인출하지 않고 운용잔액에 더한 금액"
-              />
+          {selectedFinancialMilestone && (
+            <div
+              role="tabpanel"
+              className="mt-3 min-w-0 max-w-full rounded-xl border-2 border-blue-200 bg-white p-4"
+            >
+              <div className="grid min-w-0 gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start">
+                <div className="min-w-0">
+                  <p className="text-xs font-black text-blue-700">선택한 시점</p>
+                  <h4 className="mt-1 break-words text-lg font-black text-slate-950">
+                    {selectedFinancialMilestone.labels.join(' · ')} ·{' '}
+                    {selectedFinancialMilestone.year}년
+                  </h4>
+                  <p className="mt-1 text-xs text-slate-500">
+                    본인 {selectedFinancialMilestone.row.ageA}세
+                    {selectedFinancialMilestone.row.ageB == null
+                      ? ''
+                      : ` · 배우자 ${selectedFinancialMilestone.row.ageB}세`}
+                  </p>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    disabled={selectedFinancialMilestoneIndex <= 0}
+                    onClick={() => {
+                      const previous =
+                        financialMilestones[selectedFinancialMilestoneIndex - 1];
+                      if (previous)
+                        setSelectedFinancialMilestoneYear(previous.year);
+                    }}
+                  >
+                    ← 이전
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    disabled={
+                      selectedFinancialMilestoneIndex >=
+                      financialMilestones.length - 1
+                    }
+                    onClick={() => {
+                      const next =
+                        financialMilestones[selectedFinancialMilestoneIndex + 1];
+                      if (next) setSelectedFinancialMilestoneYear(next.year);
+                    }}
+                  >
+                    다음 →
+                  </Button>
+                </div>
+              </div>
+              <div className="mt-4 grid min-w-0 gap-4 lg:grid-cols-2">
+                {(['재무상태', '월 현금흐름'] as const).map((group) => (
+                  <section
+                    key={group}
+                    className="min-w-0 rounded-xl border border-slate-200 bg-slate-50/60 p-3"
+                  >
+                    <h5 className="font-black text-slate-950">{group}</h5>
+                    <dl className="mt-2 grid min-w-0 gap-1.5">
+                      {financialMilestoneRows
+                        .filter((metric) => metric.group === group)
+                        .map((metric) => {
+                          const value = metric.value(selectedFinancialMilestone);
+                          const negative =
+                            metric.display === 'negative' && value > 0;
+                          const inflowPositive =
+                            metric.display === 'inflow' && value > 0;
+                          const differenceNegative =
+                            metric.display === 'difference' && value < 0;
+                          const differencePositive =
+                            metric.display === 'difference' && value >= 0;
+                          return (
+                            <div
+                              key={metric.item}
+                              className="grid min-w-0 grid-cols-2 items-center gap-3 rounded-lg bg-white px-3 py-2"
+                            >
+                              <dt className="min-w-0 break-words text-xs font-bold text-slate-600">
+                                {metric.item}
+                                {metric.showAssetBalanceDeduction && value > 0 && (
+                                  <span className="ml-1 text-[11px] font-bold text-rose-900">
+                                    (현금성 자산 잔액 -{money(value)})
+                                  </span>
+                                )}
+                              </dt>
+                              <dd
+                                className={`min-w-0 break-all text-right text-sm font-black ${
+                                   negative || differenceNegative
+                                     ? 'text-rose-900'
+                                     : inflowPositive || differencePositive
+                                       ? 'text-emerald-800'
+                                      : group === '재무상태'
+                                        ? 'text-blue-800'
+                                        : 'text-slate-900'
+                                }`}
+                              >
+                                {negative
+                                  ? `-${money(value)}`
+                                  : inflowPositive
+                                    ? `+${money(value)}`
+                                    : metric.display === 'difference'
+                                      ? `${value >= 0 ? '+' : '-'}${money(Math.abs(value))}`
+                                      : money(value)}
+                              </dd>
+                            </div>
+                          );
+                        })}
+                    </dl>
+                  </section>
+                ))}
+              </div>
             </div>
           )}
+          <p className="mt-2 text-[11px] leading-5 text-slate-500">
+            현재 자산·부채는 입력 시점 금액이고, 이후 시점은 해당 연도 말 예상
+            잔액입니다. 월 현금흐름은 각 연도의 대표 월 금액입니다.
+          </p>
+          <details className="mt-4 rounded-xl border border-slate-200 bg-white p-4">
+            <summary className="cursor-pointer font-black text-slate-800">
+              누계·거래·계산 완성도 세부 보기
+            </summary>
+            <div className="mt-3">
+              <SummaryTable
+              rows={[
+                {
+                  group: '현재 재무상태',
+                  item: '총자산',
+                  value: money(cashflow.finance.grossAssets),
+                  note: `실거주 주택 ${money(cashflow.finance.primaryHomeValue)} 포함`,
+                },
+                {
+                  group: '현재 재무상태',
+                  item: '총부채',
+                  value: `-${money(cashflow.finance.liabilities)}`,
+                  note: '등록한 대출잔액 합계',
+                  tone:
+                    cashflow.finance.liabilities > 0
+                      ? ('danger' as const)
+                      : ('default' as const),
+                },
+                {
+                  group: '현재 재무상태',
+                  item: '순자산',
+                  value: money(cashflow.finance.netWorth),
+                  note: '총자산 - 총부채',
+                },
+                {
+                  group: '현재 재무상태',
+                  item: '은퇴 활용 가능 자산',
+                  value: money(cashflow.finance.retirementAvailableAssets),
+                  note: '생활비 사용 계획과 현금화 시점이 지정된 현재 자산가치',
+                },
+                {
+                  group: '기준연도 월 흐름',
+                  item: '대출 원리금 상환',
+                  value: `-${money(cashflow.finance.monthlyDebtServiceAtBaseYear)}`,
+                  note: '기준연도 가구 현금소득에서 매월 차감',
+                  tone:
+                    cashflow.finance.monthlyDebtServiceAtBaseYear > 0
+                      ? ('danger' as const)
+                      : ('default' as const),
+                },
+                {
+                  group: '기준연도 월 흐름',
+                  item: '부동산 보유세',
+                  value: `-${money(cashflow.finance.monthlyPropertyHoldingTaxAtBaseYear)}`,
+                  note:
+                    cashflow.finance.monthlyPropertyHoldingTaxAtBaseYear > 0
+                      ? '분석 반영을 선택한 주택의 재산세·종부세 등을 연간 추정액의 월평균으로 차감'
+                      : '분석 반영을 선택한 주택 없음',
+                  tone:
+                    cashflow.finance.monthlyPropertyHoldingTaxAtBaseYear > 0
+                      ? ('danger' as const)
+                      : ('default' as const),
+                },
+                {
+                  group: '기준연도 월 흐름',
+                  item: '임대 순수입',
+                  value: money(
+                    cashflow.finance.monthlyRentalIncomeNetAtBaseYear,
+                  ),
+                  note: `세전 임대료 ${money(cashflow.finance.monthlyRentalIncomeGrossAtBaseYear)} · ${cashflow.finance.completeness.rentalNetIncome === 'partial' ? '비용·세금 일부 미입력' : '입력 항목 차감 완료'}`,
+                },
+                {
+                  group: '기준연도 월 흐름',
+                  item: '기타 반복소득',
+                  value: money(cashflow.finance.monthlyOtherIncomeAtBaseYear),
+                  note: '등록한 사업·기타 반복소득',
+                },
+                {
+                  group: '계산 완성도',
+                  item: '연금 세금 반영',
+                  value:
+                    result.overallTaxEstimateStatus === 'complete'
+                      ? '세후 추정 완료'
+                      : result.overallTaxEstimateStatus === 'unknown'
+                        ? '세금 미반영 항목 있음'
+                        : '세후 부분 추정',
+                  note: '퇴직소득세 등 입력 여부 기준',
+                  tone:
+                    result.overallTaxEstimateStatus === 'complete'
+                      ? ('success' as const)
+                      : ('danger' as const),
+                },
+                {
+                  group: '계획기간 누계',
+                  item: '생활비에 투입한 자산인출',
+                  value: money(cashflow.finance.plannedAssetWithdrawals),
+                  note: '매각·운용 결과를 반영해 실제 생활비에 투입한 합계',
+                },
+                {
+                  group: '계획기간 누계',
+                  item: '부동산 보유세 반영액',
+                  value: `-${money(cashflow.finance.plannedPropertyHoldingTaxes)}`,
+                  note: '분석 반영을 선택한 보유기간의 재산세·종부세 등 월평균 합계',
+                  tone:
+                    cashflow.finance.plannedPropertyHoldingTaxes > 0
+                      ? ('danger' as const)
+                      : ('default' as const),
+                },
+                {
+                  group: '계획기간 누계',
+                  item: '현금으로 받은 운용수익',
+                  value: money(cashflow.finance.plannedAssetReturnIncome),
+                  note: '생활비 사용 가능 현금에 포함한 수익 합계',
+                },
+                {
+                  group: '계획기간 누계',
+                  item: '재투자한 운용수익',
+                  value: money(cashflow.finance.plannedAssetReinvestedReturns),
+                  note: '인출하지 않고 운용잔액에 더한 수익 합계',
+                },
+                ...(cashflow.finance.linkedDebtPayoffsAtSale > 0
+                  ? [
+                      {
+                        group: '자산 매각·대출',
+                        item: '연결대출 자동상환',
+                        value: money(cashflow.finance.linkedDebtPayoffsAtSale),
+                        note: '연결 자산의 매각대금에서 먼저 상환한 추정 잔액 합계',
+                      },
+                      ...(cashflow.finance.linkedDebtPayoffFundingShortfall > 0
+                        ? [
+                            {
+                              group: '자산 매각·대출',
+                              item: '대출상환 별도 필요자금',
+                              value: money(
+                                cashflow.finance
+                                  .linkedDebtPayoffFundingShortfall,
+                              ),
+                              note: '비용·세금 차감 후 매각대금으로 대출을 모두 갚지 못하는 금액',
+                              tone: 'danger' as const,
+                            },
+                          ]
+                        : []),
+                    ]
+                  : []),
+                ...(householdFinance.assets.some(
+                  (asset) => asset.housingMovePlan?.enabled,
+                )
+                  ? [
+                      {
+                        group: '주거 이전',
+                        item: '주택 교체 후 생성된 운용자금',
+                        value: money(
+                          cashflow.finance.housingMoveInvestableSurplus,
+                        ),
+                        note: '예상 매각대금 - 새 주택 가격·취득비용',
+                      },
+                      {
+                        group: '주거 이전',
+                        item: '새 주택 구입 별도 필요자금',
+                        value: money(
+                          cashflow.finance.housingPurchaseFundingShortfall,
+                        ),
+                        note: '매각대금보다 구입비용이 큰 경우의 일시 부족액',
+                        tone:
+                          cashflow.finance.housingPurchaseFundingShortfall > 0
+                            ? ('danger' as const)
+                            : ('default' as const),
+                      },
+                      {
+                        group: '분석 종료시점',
+                        item: '새 주택 예상가치',
+                        value: money(
+                          cashflow.finance.replacementHousingValueAtEnd,
+                        ),
+                        note: '입력한 새 주택 연 가치변동률 반영',
+                      },
+                    ]
+                  : []),
+                {
+                  group: '분석 종료시점',
+                  item: '남은 활용자산',
+                  value: money(cashflow.finance.remainingPlannedAssetsAtEnd),
+                  note: '보유만 하기로 한 자산은 제외',
+                },
+              ]}
+              />
+            </div>
+          </details>
           {householdFinance.assets.length > 0 && (
             <div className="mt-4 rounded-xl border border-violet-200 bg-violet-50/60 p-4">
               <h4 className="font-black text-violet-950">
@@ -4237,104 +5387,116 @@ function LivingCostIncomeReport({
                 자산가치를 한꺼번에 부족재원에서 빼지 않고, 아래 시점과 방식대로
                 해당 연도의 현금흐름에 넣습니다.
               </p>
-              <div className="mt-3 grid gap-2 lg:grid-cols-2">
-                {householdFinance.assets.map((asset) => {
-                  const plan = resolveAssetUsePlan(asset, currentYear);
-                  const drawRows = cashflow.rows.filter((row) =>
-                    row.assetWithdrawalDetails.some(
-                      (detail) => detail.assetId === asset.id,
-                    ),
-                  );
-                  const assetTransactions = cashflow.rows.flatMap((row) =>
-                    row.assetTransactionDetails
-                      .filter((detail) => detail.assetId === asset.id)
-                      .map((detail) => ({ year: row.year, ...detail })),
-                  );
-                  const purchaseTransaction = assetTransactions.find(
-                    (detail) => detail.purchasedAssetName,
-                  );
-                  const totalDraw = drawRows.reduce(
-                    (sum, row) =>
-                      sum +
-                      (row.assetWithdrawalDetails.find(
-                        (detail) => detail.assetId === asset.id,
-                      )?.amount ?? 0) *
-                        12,
-                    0,
-                  );
-                  const modeText =
-                    plan.mode === 'cover_gap'
-                      ? '생활비가 부족한 해에 필요한 금액만 인출'
-                      : plan.mode === 'fixed_monthly'
-                        ? `매월 ${money(plan.monthlyAmount ?? 0)} 인출`
-                        : '생활비 현금흐름에는 사용하지 않고 보유';
-                  return (
-                    <div
-                      key={asset.id}
-                      className="rounded-lg border border-violet-100 bg-white px-3 py-2 text-xs leading-5 text-slate-700"
-                    >
-                      <p className="font-black text-slate-950">{asset.name}</p>
-                      <p>{modeText}</p>
-                      {plan.mode !== 'hold' && (
-                        <p>
-                          설정 기간 {plan.startYear}년
-                          {plan.endYear == null ? '부터' : `~${plan.endYear}년`} · 최소{' '}
-                          {money(plan.reserveAmount ?? 0)} 유지
-                        </p>
-                      )}
-                      {asset.salePlan?.enabled && (
-                        <p>
-                          {asset.salePlan.year}년 매각
-                          {asset.housingMovePlan?.enabled
-                            ? ` → ${asset.housingMovePlan.purchaseYear}년 ${asset.housingMovePlan.replacementName} 구입`
-                            : ' 후 비용·세금 차감액부터 사용'}
-                        </p>
-                      )}
-                      {asset.housingMovePlan?.enabled && purchaseTransaction && (
-                        <div className="my-2 rounded-md bg-violet-50 px-2 py-1.5 font-bold text-violet-950">
-                          {purchaseTransaction.year}년 계산: 매각·대기자금{' '}
-                          {money(purchaseTransaction.saleProceeds)} - 새 주택 구입비용{' '}
-                          {money(purchaseTransaction.purchaseCost ?? 0)} = 운용자금{' '}
-                          {money(purchaseTransaction.investableSurplus)}
-                          {purchaseTransaction.fundingShortfall > 0 && (
-                            <>
-                              {' '}
-                              · 별도 조달{' '}
-                              {money(purchaseTransaction.fundingShortfall)} 필요
-                            </>
-                          )}
-                          <br />
-                          {asset.housingMovePlan.surplusName} ·{' '}
-                          {asset.housingMovePlan.surplusType === 'deposit'
-                            ? '예금'
-                            : '투자'}{' '}
-                          연 {asset.housingMovePlan.surplusAnnualReturnRate}% ·{' '}
-                          {asset.housingMovePlan.surplusReturnMode === 'reinvest'
-                            ? '수익 재투자'
-                            : '수익을 생활비 현금으로 사용'}
-                        </div>
-                      )}
-                      {plan.mode !== 'hold' && (
-                        <p className="mt-1 font-bold text-violet-800">
-                          계산 결과:{' '}
-                          {drawRows.length
+              <div className="mt-3 overflow-x-auto rounded-lg border border-violet-200 bg-white">
+                <Table className="min-w-[980px]">
+                  <TableHeader>
+                    <TableRow className="bg-violet-100/70">
+                      <TableHead className="font-black">자산</TableHead>
+                      <TableHead className="font-black">
+                        생활비 활용 방식
+                      </TableHead>
+                      <TableHead className="font-black">
+                        활용 시기·유지액
+                      </TableHead>
+                      <TableHead className="font-black">
+                        매각·주거 이전
+                      </TableHead>
+                      <TableHead className="text-right font-black">
+                        계산 결과
+                      </TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {householdFinance.assets.map((asset) => {
+                      const plan = resolveAssetUsePlan(asset, currentYear);
+                      const drawRows = cashflow.rows.filter((row) =>
+                        row.assetWithdrawalDetails.some(
+                          (detail) => detail.assetId === asset.id,
+                        ),
+                      );
+                      const assetTransactions = cashflow.rows.flatMap((row) =>
+                        row.assetTransactionDetails
+                          .filter((detail) => detail.assetId === asset.id)
+                          .map((detail) => ({ year: row.year, ...detail })),
+                      );
+                      const purchaseTransaction = assetTransactions.find(
+                        (detail) => detail.purchasedAssetName,
+                      );
+                      const saleTransaction = assetTransactions.find(
+                        (detail) =>
+                          detail.transactionKind === 'sale' ||
+                          detail.transactionKind === 'sale_and_purchase',
+                      );
+                      const totalDraw = drawRows.reduce(
+                        (sum, row) =>
+                          sum +
+                          (row.assetWithdrawalDetails.find(
+                            (detail) => detail.assetId === asset.id,
+                          )?.amount ?? 0) *
+                            12,
+                        0,
+                      );
+                      const modeText =
+                        plan.mode === 'cover_gap'
+                          ? '생활비가 부족한 해에 필요한 금액만 인출'
+                          : plan.mode === 'fixed_monthly'
+                            ? `매월 ${money(plan.monthlyAmount ?? 0)} 인출`
+                            : '생활비 현금흐름에는 사용하지 않고 보유';
+                      const periodText =
+                        plan.mode === 'hold'
+                          ? '해당 없음'
+                          : `${plan.startYear}년${plan.endYear == null ? '부터' : `~${plan.endYear}년`} · 최소 ${money(plan.reserveAmount ?? 0)} 유지`;
+                      const transactionText = asset.salePlan?.enabled
+                        ? `${asset.salePlan.year}년 매각${(saleTransaction?.linkedDebtPayoff ?? 0) > 0 ? ` · 연결대출 ${money(saleTransaction?.linkedDebtPayoff ?? 0)} 상환` : ''}${asset.housingMovePlan?.enabled ? ` → ${asset.housingMovePlan.purchaseYear}년 ${asset.housingMovePlan.replacementName} 구입` : ' 후 순매각액 사용'}`
+                        : '매각 계획 없음';
+                      const purchaseText =
+                        asset.housingMovePlan?.enabled && purchaseTransaction
+                          ? ` · ${purchaseTransaction.year}년 운용자금 ${money(purchaseTransaction.investableSurplus)}${purchaseTransaction.fundingShortfall > 0 ? `, 별도 조달 ${money(purchaseTransaction.fundingShortfall)}` : ''}`
+                          : '';
+                      const resultText =
+                        plan.mode === 'hold'
+                          ? '실제 인출 없음'
+                          : drawRows.length
                             ? `${drawRows[0].year}년부터 총 ${money(totalDraw)} 인출`
-                            : '인출 가능한 시점 또는 생활비 부족이 없어 실제 인출 0원'}
-                        </p>
-                      )}
-                    </div>
-                  );
-                })}
+                            : '인출 가능 시점 또는 생활비 부족이 없어 0원';
+                      return (
+                        <TableRow key={asset.id}>
+                          <TableCell className="font-black text-slate-950">
+                            {asset.name}
+                          </TableCell>
+                          <TableCell className="text-xs leading-5">
+                            {modeText}
+                          </TableCell>
+                          <TableCell className="text-xs leading-5">
+                            {periodText}
+                          </TableCell>
+                          <TableCell className="text-xs leading-5">
+                            {transactionText}
+                            {purchaseText}
+                          </TableCell>
+                          <TableCell className="text-right text-xs font-black leading-5 text-violet-800">
+                            {resultText}
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
+                  </TableBody>
+                </Table>
               </div>
             </div>
           )}
         </section>
 
+        <PensionCompositionSummary
+          result={result}
+          basicPensionMonthly={basicPensionMonthly}
+        />
+
         <section className="rounded-xl border-2 border-amber-200 bg-amber-50/50 p-5">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
               <h3 className="text-lg font-black text-amber-950">
-                생활비 부족구간과 필요재원
+                5. 생활비 부족구간과 필요재원 상세
               </h3>
               <p className="mt-1 text-xs leading-5 text-amber-800">
                 현재연도부터 부분은퇴·가구은퇴·연금 종료·첫 사망 이후를 모두
@@ -4346,60 +5508,340 @@ function LivingCostIncomeReport({
               {cashflow.discountRate}%
             </Badge>
           </div>
-          <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-            <Metric
-              label="첫 부족연도"
-              value={
-                cashflow.firstGapYear ? `${cashflow.firstGapYear}년` : '없음'
-              }
-              note={
-                cashflow.firstGapYear
-                  ? '가구 전체 은퇴가 아니라 최초 실제 부족 시점'
-                  : '분석 구간의 생활비 기준 충족'
-              }
-            />
-            <Metric
-              label="최대 월 부족액"
-              value={
-                cashflow.maximumMonthlyGap > 0
-                  ? `-${money(cashflow.maximumMonthlyGap)}`
-                  : money(0)
-              }
-              note="각 연도 월 부족액 중 최댓값"
-              tone={cashflow.maximumMonthlyGap > 0 ? 'danger' : 'default'}
-            />
-            <Metric
-              label="자산 사용 전 부족액 현재가치"
-              value={money(cashflow.exactGapPresentValue)}
-              note={`${cashflow.baseYear}년 가치 · 연금·소득만으로 계산`}
-            />
-            <Metric
-              label="스트레스 필요재원 상한"
-              value={money(cashflow.conservativeStressCapital)}
-              note="최대 부족액이 계속된다는 보수적 비교값"
-            />
+          <div className="mt-4 rounded-xl border border-amber-300 bg-white p-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h4 className="font-black text-amber-950">부족구간 전체 흐름</h4>
+              <Badge
+                variant="outline"
+                className={
+                  cashflow.exactGapPresentValueAfterAssets > 0
+                    ? 'border-rose-300 bg-rose-100 text-rose-900'
+                    : 'border-emerald-300 bg-emerald-100 text-emerald-900'
+                }
+              >
+                {cashflow.exactGapPresentValueAfterAssets > 0
+                  ? '자산 사용 후에도 부족'
+                  : '등록 자산으로 전 구간 충당'}
+              </Badge>
+            </div>
+            {assetFundingPlans.length > 0 ? (
+              <>
+                <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                  {assetFundingPlans.map((plan) => {
+                    const phaseMeta = cashflowPhaseMeta(plan.phase);
+                    return (
+                      <div
+                        key={`gap-summary-${plan.startYear}-${plan.phase}`}
+                        className="min-w-0 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2"
+                      >
+                        <div className="flex flex-wrap items-center gap-2">
+                          <b className="text-sm text-slate-950">
+                            {plan.startYear}
+                            {plan.endYear === plan.startYear
+                              ? '년'
+                              : `~${plan.endYear}년`}
+                          </b>
+                          <Badge
+                            variant="outline"
+                            className={phaseMeta.className}
+                          >
+                            {phaseMeta.label}
+                          </Badge>
+                        </div>
+                        <p className="mt-1 text-xs leading-5 text-slate-600">
+                          월 부족 {money(plan.firstRow?.monthlyGapBeforeAsset ?? 0)}
+                          {plan.lastRow &&
+                          plan.lastRow.monthlyGapBeforeAsset !==
+                            plan.firstRow?.monthlyGapBeforeAsset
+                            ? ` → ${money(plan.lastRow.monthlyGapBeforeAsset)}`
+                            : ''}
+                        </p>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="mt-3 grid gap-2 border-t border-amber-200 pt-3 text-xs leading-5 text-slate-700 md:grid-cols-3">
+                  <p>
+                    <b className="block text-slate-950">자산 사용 전 부족</b>
+                    {money(cashflow.exactGapPresentValue)}
+                    <span className="block text-[11px] text-slate-500">
+                      {cashflow.baseYear}년 현재가치
+                    </span>
+                  </p>
+                  <p>
+                    <b className="block text-slate-950">기간 전체 자산 인출</b>
+                    {money(
+                      assetFundingPlans.reduce(
+                        (sum, plan) => sum + plan.totalWithdrawal,
+                        0,
+                      ),
+                    )}
+                    <span className="block text-[11px] text-slate-500">
+                      각 구간 인출액의 단순 명목 합계
+                    </span>
+                  </p>
+                  <p>
+                    <b className="block text-slate-950">자산 사용 후 남는 부족</b>
+                    <span
+                      className={
+                        cashflow.exactGapPresentValueAfterAssets > 0
+                          ? 'font-black text-rose-900'
+                          : 'font-black text-emerald-800'
+                      }
+                    >
+                      {money(cashflow.exactGapPresentValueAfterAssets)}
+                    </span>
+                    <span className="block text-[11px] text-slate-500">
+                      {cashflow.baseYear}년 현재가치
+                    </span>
+                  </p>
+                </div>
+              </>
+            ) : (
+              <p className="mt-2 text-sm font-bold text-emerald-800">
+                분석기간에 생활비 부족구간이 없습니다.
+              </p>
+            )}
+          </div>
+          {assetFundingPlans.length > 0 ? (
+            <div className="mt-5 rounded-xl border-2 border-blue-200 bg-blue-50/50 p-4">
+              <div>
+                <h4 className="font-black text-blue-950">
+                  부족재원은 등록한 자산에서 이렇게 충당합니다
+                </h4>
+                <p className="mt-1 text-xs leading-5 text-blue-800">
+                  연금·반복소득만으로 모자라는 금액과 실제 자산 인출을 구간별로
+                  연결했습니다. 총액은 해당 기간의 단순 명목 합계입니다.
+                </p>
+              </div>
+              <div
+                data-print-table="funding"
+                className="mt-3 max-w-full overflow-x-auto rounded-xl border border-blue-200 bg-white"
+              >
+                <Table className="min-w-[1400px]">
+                  <TableHeader>
+                    <TableRow className="bg-blue-100/70">
+                      <TableHead className="w-[135px]">부족 발생 연도</TableHead>
+                      <TableHead className="w-[135px]">생애 단계</TableHead>
+                      <TableHead className="w-[235px]">부부 나이</TableHead>
+                      <TableHead className="w-[225px]">필요한 월 보충액</TableHead>
+                      <TableHead className="w-[210px]">충당 자산</TableHead>
+                      <TableHead className="w-[225px]">월 인출 흐름</TableHead>
+                      <TableHead className="w-[270px]">충당 결과</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {assetFundingPlans.map((plan) => {
+                      const phaseMeta = cashflowPhaseMeta(plan.phase);
+                      const periodLabel = `${plan.startYear}${
+                        plan.endYear === plan.startYear
+                          ? '년'
+                          : `~${plan.endYear}년`
+                      }`;
+                      return (
+                        <TableRow key={`${plan.startYear}-${plan.phase}`}>
+                          <TableCell className="align-top">
+                            <b className="block text-blue-950">
+                              {periodLabel}
+                            </b>
+                          </TableCell>
+                          <TableCell className="align-top">
+                            <Badge
+                              variant="outline"
+                              className={phaseMeta.className}
+                            >
+                              {phaseMeta.label}
+                            </Badge>
+                          </TableCell>
+                          <TableCell className="align-top text-xs leading-5">
+                            <div className="grid gap-1">
+                              <CompactFormulaLine
+                                label={`시작 ${plan.startYear}년`}
+                                value={`본인 ${plan.firstRow?.ageA}세${
+                                  plan.firstRow?.ageB == null
+                                    ? ''
+                                    : ` · 배우자 ${plan.firstRow.ageB}세`
+                                }`}
+                              />
+                              <CompactFormulaLine
+                                label={`종료 ${plan.endYear}년`}
+                                value={`본인 ${plan.lastRow?.ageA}세${
+                                  plan.lastRow?.ageB == null
+                                    ? ''
+                                    : ` · 배우자 ${plan.lastRow.ageB}세`
+                                }`}
+                              />
+                            </div>
+                          </TableCell>
+                          <TableCell className="align-top text-xs leading-5">
+                            <div className="grid gap-1">
+                              <CompactFormulaLine
+                                label="시작 월 부족"
+                                value={`-${money(plan.firstRow?.monthlyGapBeforeAsset ?? 0)}`}
+                                tone="negative"
+                              />
+                              <CompactFormulaLine
+                                label="종료 월 부족"
+                                value={`-${money(plan.lastRow?.monthlyGapBeforeAsset ?? 0)}`}
+                                tone="negative"
+                              />
+                              <CompactFormulaLine
+                                label="구간 최대 부족"
+                                value={`-${money(plan.maxMonthlyGap)}`}
+                                tone="negative"
+                              />
+                            </div>
+                          </TableCell>
+                          <TableCell className="align-top text-xs leading-5">
+                            <div className="grid gap-1">
+                            {plan.totalWithdrawal > 0 ? (
+                              plan.sources.map((source) => (
+                                <CompactFormulaLine
+                                  key={source.name}
+                                  label={source.name}
+                                  value={`+${money(source.total)}`}
+                                  tone="positive"
+                                />
+                              ))
+                            ) : (
+                              <CompactFormulaLine
+                                label="인출 자산"
+                                value="미지정"
+                                tone="negative"
+                              />
+                            )}
+                            </div>
+                          </TableCell>
+                          <TableCell className="align-top text-xs leading-5">
+                            <div className="grid gap-1">
+                            {plan.totalWithdrawal > 0 ? (
+                              <>
+                                <CompactFormulaLine
+                                  label={`시작 ${plan.firstWithdrawalRow?.year}년`}
+                                  value={`+${money(plan.firstWithdrawalRow?.assetWithdrawal ?? 0)}`}
+                                  tone="positive"
+                                />
+                                <CompactFormulaLine
+                                  label={`종료 ${plan.lastWithdrawalRow?.year}년`}
+                                  value={`+${money(plan.lastWithdrawalRow?.assetWithdrawal ?? 0)}`}
+                                  tone="positive"
+                                />
+                                <CompactFormulaLine
+                                  label="구간 최대 인출"
+                                  value={`+${money(plan.maximumWithdrawal)}`}
+                                  tone="positive"
+                                />
+                              </>
+                            ) : (
+                              <>
+                                <CompactFormulaLine
+                                  label={`시작 ${plan.startYear}년`}
+                                  value="+0원"
+                                />
+                                <CompactFormulaLine
+                                  label={`종료 ${plan.endYear}년`}
+                                  value="+0원"
+                                />
+                                <CompactFormulaLine
+                                  label="구간 최대 인출"
+                                  value="+0원"
+                                />
+                              </>
+                            )}
+                            </div>
+                          </TableCell>
+                          <TableCell className="align-top text-xs leading-5">
+                            <Badge
+                              variant="outline"
+                              className={
+                                plan.maximumResidual > 0
+                                  ? 'border-rose-300 bg-rose-100 text-rose-900'
+                                  : 'border-emerald-300 bg-emerald-100 text-emerald-900'
+                              }
+                            >
+                              {plan.maximumResidual > 0
+                                ? `${plan.coverageRate}% 충당`
+                                : '100% 충당'}
+                            </Badge>
+                            <div className="mt-2 grid gap-1 border-b border-slate-200 pb-2">
+                              <CompactFormulaLine
+                                label="필요재원"
+                                value={`-${money(plan.totalNeed)}`}
+                                tone="negative"
+                              />
+                              <CompactFormulaLine
+                                label="자산인출"
+                                value={`+${money(plan.totalWithdrawal)}`}
+                                tone="positive"
+                              />
+                              <CompactFormulaLine
+                                label="미충당액"
+                                value={`=${money(Math.max(0, plan.totalNeed - plan.totalWithdrawal))}`}
+                                tone={
+                                  plan.totalNeed - plan.totalWithdrawal > 0
+                                    ? 'negative'
+                                    : 'result'
+                                }
+                              />
+                              <CompactFormulaLine
+                                label="구간 말 자산잔액"
+                                value={money(
+                                  plan.lastRow?.cashAndFinancialAssetBalance ?? 0,
+                                )}
+                              />
+                            </div>
+                            <b
+                              className={`mt-1 block ${
+                                plan.maximumResidual > 0
+                                  ? 'text-rose-900'
+                                  : 'text-emerald-800'
+                              }`}
+                            >
+                              {plan.maximumResidual > 0
+                                ? `${plan.firstResidualYear}년부터 최대 월 ${money(plan.maximumResidual)} 부족`
+                                : '등록 자산으로 모두 충당'}
+                            </b>
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
+                  </TableBody>
+                </Table>
+              </div>
+            </div>
+          ) : (
+            <p className="mt-5 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm font-bold text-emerald-800">
+              연금·반복소득만으로 생활비를 충족하므로 현금자산에서 가져올 필요재원이
+              없습니다.
+            </p>
+          )}
+          <div className="mt-5">
+            <h4 className="font-black text-amber-950">
+              자산을 사용한 뒤에도 남는 부족구간
+            </h4>
+            <p className="mt-1 text-xs leading-5 text-amber-800">
+              위 인출 계획을 적용하고도 생활비를 다 채우지 못한 기간만 표시합니다.
+            </p>
           </div>
           {cashflow.gapPeriods.length > 0 ? (
             <div className="mt-4 grid gap-3 lg:grid-cols-2">
-              {cashflow.gapPeriods.map((period, index) => (
+              {cashflow.gapPeriods.map((period) => (
                 <div
                   key={`${period.startYear}-${period.phase}`}
                   className="rounded-xl border border-amber-200 bg-white p-4"
                 >
                   <div className="flex items-center justify-between gap-2">
                     <p className="font-black text-amber-950">
-                      부족구간 {index + 1} · {period.startYear}
+                      {period.startYear}
                       {period.endYear === period.startYear
                         ? '년'
                         : `~${period.endYear}년`}
                     </p>
-                    <Badge variant="outline">
-                      {{
-                        working: '은퇴 전',
-                        partial_retirement: '부분은퇴',
-                        full_retirement: '가구은퇴',
-                        survivor: '첫 사망 이후',
-                      }[period.phase] ?? period.phase}
+                    <Badge
+                      variant="outline"
+                      className={cashflowPhaseMeta(period.phase).className}
+                    >
+                      {cashflowPhaseMeta(period.phase).label}
                     </Badge>
                   </div>
                   <p className="mt-2 text-sm leading-6 text-slate-700">
@@ -4423,12 +5865,12 @@ function LivingCostIncomeReport({
               </p>
               <p className="mt-2 text-sm leading-6 text-slate-700">
                 자산을 쓰지 않을 때 부족액 현재가치는{' '}
-                {money(cashflow.exactGapPresentValue)}입니다. 등록한 시작연도·매각
-                시점·인출방식에 따라 총{' '}
-                <b>{money(cashflow.finance.plannedAssetWithdrawals)}</b>을 생활비에
-                투입한 뒤에도 남는 부족액 현재가치는{' '}
-                <b>{money(cashflow.exactGapPresentValueAfterAssets)}</b>입니다. 마지막
-                분석연도에 남는 활용 예정 자산은{' '}
+                {money(cashflow.exactGapPresentValue)}입니다. 등록한
+                시작연도·매각 시점·인출방식에 따라 총{' '}
+                <b>{money(cashflow.finance.plannedAssetWithdrawals)}</b>을
+                생활비에 투입한 뒤에도 남는 부족액 현재가치는{' '}
+                <b>{money(cashflow.exactGapPresentValueAfterAssets)}</b>입니다.
+                마지막 분석연도에 남는 활용 예정 자산은{' '}
                 {money(cashflow.finance.remainingPlannedAssetsAtEnd)}입니다.
                 {cashflow.suggestedMonthlyContribution > 0 && (
                   <>
@@ -4469,9 +5911,9 @@ function LivingCostIncomeReport({
               <b>
                 {money(householdRetirementRow.householdCashAvailableAfterAsset)}
               </b>{' '}
-              (운용수익 +{money(householdRetirementRow.assetReturnIncome)} · 자산인출 +
-              {money(householdRetirementRow.assetWithdrawal)}) · 생활비{' '}
-              <b>{money(householdRetirementRow.livingCost)}</b> · 월{' '}
+              (운용수익 +{money(householdRetirementRow.assetReturnIncome)} ·
+              자산인출 +{money(householdRetirementRow.assetWithdrawal)}) ·
+              생활비 <b>{money(householdRetirementRow.livingCost)}</b> · 월{' '}
               {householdRetirementRow.monthlyGap > 0
                 ? `${money(householdRetirementRow.monthlyGap)} 부족`
                 : `${money(householdRetirementRow.monthlySurplus)} 여유`}
@@ -4479,45 +5921,39 @@ function LivingCostIncomeReport({
           </section>
         )}
 
-        {result.afterFirstDeath && (
-          <section className="rounded-xl border border-violet-200 bg-violet-50/50 p-5">
-            <h3 className="text-lg font-black text-violet-950">
-              첫 사망 후 전환 · {result.afterFirstDeath.year}년
-            </h3>
-            <div className="mt-3 grid gap-3 md:grid-cols-3">
-              <Metric
-                label="생존자 국민연금 선택액"
-                value={money(result.afterFirstDeath.selectedNationalPension)}
-                note={result.afterFirstDeath.decisionText}
-              />
-              <Metric
-                label="생존자 개인·퇴직연금"
-                value={money(result.afterFirstDeath.additionalPrivatePension)}
-                note={`같은 해 기초연금 ${money(result.afterFirstDeath.basicPension)} 별도 합산`}
-              />
-              <Metric
-                label="전환연도 전체 연금소득"
-                value={money(result.afterFirstDeath.totalNetPension)}
-                note="국민연금 선택액 + 기초·기타 연금"
-              />
-            </div>
-          </section>
-        )}
-
         {cashflow.warnings.length > 0 && (
-          <section className="grid gap-2">
-            {cashflow.warnings.map((warning) => (
-              <p
-                key={warning.code}
-                className={`rounded-lg border px-4 py-3 text-sm font-semibold leading-6 ${
-                  warning.severity === 'critical'
-                    ? 'border-rose-300 bg-rose-50 text-rose-950'
-                    : 'border-amber-300 bg-amber-50 text-amber-950'
-                }`}
-              >
-                <b>{warning.code}:</b> {warning.message}
-              </p>
-            ))}
+          <section className="rounded-xl border-2 border-amber-300 bg-amber-50/50 p-4">
+            <h3 className="font-black text-amber-950">계산 전 확인할 항목</h3>
+            <div className="mt-3 overflow-x-auto rounded-lg border border-amber-200 bg-white">
+              <Table className="min-w-[760px]">
+                <TableHeader>
+                  <TableRow className="bg-amber-100/70">
+                    <TableHead className="w-24 font-black">중요도</TableHead>
+                    <TableHead className="w-60 font-black">확인 항목</TableHead>
+                    <TableHead className="font-black">설명</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {cashflow.warnings.map((warning) => (
+                    <TableRow key={warning.code}>
+                      <TableCell
+                        className={`font-black ${warning.severity === 'critical' ? 'text-rose-800' : 'text-amber-800'}`}
+                      >
+                        {warning.severity === 'critical'
+                          ? '필수 확인'
+                          : '참고 확인'}
+                      </TableCell>
+                      <TableCell className="font-bold text-slate-900">
+                        {cashflowWarningLabels[warning.code] ?? warning.code}
+                      </TableCell>
+                      <TableCell className="text-sm leading-6 text-slate-700">
+                        {warning.message}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
           </section>
         )}
 
@@ -4558,7 +5994,10 @@ function Report({
     policy,
   );
   return (
-    <div className="grid gap-5 print-area">
+    <div
+      data-print="report"
+      className="grid w-full min-w-0 max-w-full gap-5 print-area"
+    >
       <LivingCostIncomeReport
         result={result}
         policy={policy}
@@ -4566,54 +6005,8 @@ function Report({
         livingCost={livingCost}
         householdFinance={householdFinance}
         includeLateLifeGap={includeLateLifeGap}
+        basicPensionMonthly={basicPensionMonthly}
       />
-      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-7">
-        <Metric
-          label="전체 연금 월 합산"
-          value={money(result.bothAliveMonthly)}
-          note="국민·기초·개인·퇴직연금"
-        />
-        <Metric
-          label="국민연금 월 합산"
-          value={money(result.bothAliveNationalMonthly)}
-          note="선택한 수령 전략 기준"
-        />
-        <Metric
-          label="기초연금 월 합산"
-          value={money(basicPensionMonthly)}
-          note="두 사람 모두 65세 이상인 시점 기준"
-        />
-        <Metric
-          label="개인·퇴직연금 월 합산"
-          value={money(result.bothAliveAdditionalMonthly)}
-          note="모든 등록 계좌 합계"
-        />
-        <Metric
-          label={
-            result.overallTaxEstimateStatus === 'complete'
-              ? '예상 세후 월 합산'
-              : result.overallTaxEstimateStatus === 'partial'
-                ? '세후 부분 추정 월 합산'
-                : '세금 미반영 항목 포함'
-          }
-          value={money(result.estimatedBothAliveNetMonthly)}
-          note={`세금 추정 상태: ${result.overallTaxEstimateStatus}`}
-        />
-        <Metric
-          label="첫 사망 후 월 합산"
-          value={
-            result.afterFirstDeathMonthly == null
-              ? '해당 없음'
-              : money(result.afterFirstDeathMonthly)
-          }
-          note="유족연금 + 생존자 기타연금"
-        />
-        <Metric
-          label="국민연금 추가 납부액"
-          value={money(result.totalAdditionalContribution)}
-          note="임의계속가입 부부 합계"
-        />
-      </div>
       {result.additionalPensions.length > 0 && (
         <Card>
           <CardHeader>
@@ -4623,8 +6016,8 @@ function Report({
               유지된다고 가정합니다.
             </CardDescription>
           </CardHeader>
-          <CardContent className="p-0">
-            <Table>
+          <CardContent className="overflow-x-auto p-0">
+            <Table className="min-w-[860px]">
               <TableHeader>
                 <TableRow>
                   <TableHead>대상·연금</TableHead>
@@ -4702,7 +6095,7 @@ function Report({
         </CardHeader>
         <CardContent className="p-0">
           <div className="max-h-[620px] overflow-auto">
-            <Table>
+            <Table className="min-w-[860px]">
               <TableHeader className="sticky top-0 bg-slate-100">
                 <TableRow>
                   <TableHead>연도</TableHead>
@@ -4790,12 +6183,38 @@ export default function Home() {
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [sessionExists, setSessionExists] = useState(false);
+  const [lastSaveKind, setLastSaveKind] = useState<ProfileSaveKind>(null);
+  const [lastSavedAt, setLastSavedAt] = useState<Date | null>(null);
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [profileFileName, setProfileFileName] = useState('');
-  const policyInput = useRef<HTMLInputElement>(null);
+  const [profileFileMode, setProfileFileMode] =
+    useState<ProfileFileMode>('none');
+  const [profileFileWriteReady, setProfileFileWriteReady] = useState(false);
+  const [profileDialogMode, setProfileDialogMode] =
+    useState<ProfileDialogMode>(null);
+  const [profileDialogFileName, setProfileDialogFileName] = useState('');
+  const [profileDialogPassword, setProfileDialogPassword] = useState('');
+  const [profileDialogPasswordConfirm, setProfileDialogPasswordConfirm] =
+    useState('');
+  const [profileDialogError, setProfileDialogError] = useState('');
+  const [showProfileDialogPasswords, setShowProfileDialogPasswords] =
+    useState(false);
+  const [pendingProfileFile, setPendingProfileFile] = useState<File | null>(
+    null,
+  );
+  const [saveAsCurrentPassword, setSaveAsCurrentPassword] = useState('');
+  const [saveAsNewPassword, setSaveAsNewPassword] = useState('');
+  const [saveAsNewPasswordConfirm, setSaveAsNewPasswordConfirm] = useState('');
+  const [pendingPolicyUpdate, setPendingPolicyUpdate] =
+    useState<PolicyUpdatePackage | null>(null);
+  const policyMarkdownInput = useRef<HTMLInputElement>(null);
   const profileInput = useRef<HTMLInputElement>(null);
   const profileFileHandle = useRef<ProfileFileHandle | null>(null);
+  const pendingProfileFileHandle = useRef<ProfileFileHandle | null>(null);
   const profileFilePassword = useRef('');
   const saveProfileShortcut = useRef<() => Promise<void>>(async () => {});
+  const dirtyTrackingStarted = useRef(false);
+  const suppressNextDirtyCheck = useRef(false);
   const update = (who: 'a' | 'b', value: PersonInput) =>
     setForm((prev) => ({ ...prev, [who]: value }));
   const canSimulate = useMemo(
@@ -4812,6 +6231,25 @@ export default function Home() {
     );
     return () => window.clearTimeout(id);
   }, []);
+  useEffect(() => {
+    if (!dirtyTrackingStarted.current) {
+      dirtyTrackingStarted.current = true;
+      return;
+    }
+    if (suppressNextDirtyCheck.current) {
+      suppressNextDirtyCheck.current = false;
+      return;
+    }
+    setHasUnsavedChanges(true);
+  }, [form, policy]);
+  useEffect(() => {
+    if (!hasUnsavedChanges) return;
+    const warnBeforeLeaving = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+    };
+    window.addEventListener('beforeunload', warnBeforeLeaving);
+    return () => window.removeEventListener('beforeunload', warnBeforeLeaving);
+  }, [hasUnsavedChanges]);
   useEffect(() => {
     if (!message) return;
     const id = window.setTimeout(() => setMessage(''), 4000);
@@ -4872,6 +6310,7 @@ export default function Home() {
             birthYearB,
           )
         : initialForm().pensionGoalTimelines);
+    suppressNextDirtyCheck.current = true;
     setForm({
       a: {
         ...saved.form.a,
@@ -4932,10 +6371,22 @@ export default function Home() {
         ...defaultLivingCostSettings(),
         ...saved.form.livingCost,
       },
-      householdFinance:
-        saved.form.householdFinance ?? defaultHouseholdFinanceSettings(),
+      householdFinance: {
+        ...defaultHouseholdFinanceSettings(),
+        ...saved.form.householdFinance,
+        realEstateCostPolicy: saved.form.householdFinance?.realEstateCostPolicy
+          ? validateRealEstateCostPolicy(
+              saved.form.householdFinance.realEstateCostPolicy,
+            )
+          : DEFAULT_REAL_ESTATE_COST_POLICY,
+      },
     });
     setPolicy(validatePolicy(saved.policy));
+  };
+  const markProfileSaved = (kind: Exclude<ProfileSaveKind, null>) => {
+    setLastSaveKind(kind);
+    setLastSavedAt(new Date());
+    setHasUnsavedChanges(false);
   };
   const saveSession = async () => {
     try {
@@ -4944,6 +6395,7 @@ export default function Home() {
         password,
       );
       setSessionExists(true);
+      markProfileSaved('session');
       setPassword('');
       setMessage(
         '이 탭의 sessionStorage에 암호화하여 저장했습니다. 탭을 닫으면 사라집니다.',
@@ -4956,36 +6408,110 @@ export default function Home() {
     try {
       const saved = await loadEncryptedSession<SavedProfile>(password);
       applySavedProfile(saved);
+      markProfileSaved('session');
       setPassword('');
       setMessage('암호화 세션을 복원했습니다.');
     } catch (e) {
       setMessage((e as Error).message);
     }
   };
+  const queryProfileWritePermission = async (handle: ProfileFileHandle) => {
+    try {
+      return handle.queryPermission
+        ? await handle.queryPermission({ mode: 'readwrite' })
+        : ('granted' as PermissionState);
+    } catch {
+      return 'prompt' as PermissionState;
+    }
+  };
+  const ensureProfileWritePermission = async (handle: ProfileFileHandle) => {
+    let permission = await queryProfileWritePermission(handle);
+    if (permission !== 'granted' && handle.requestPermission) {
+      try {
+        permission = await handle.requestPermission({ mode: 'readwrite' });
+      } catch {
+        permission = 'denied';
+      }
+    }
+    if (permission !== 'granted')
+      throw new Error(
+        `${handle.name}의 쓰기 권한이 필요합니다. 권한 요청에서 허용한 뒤 다시 Ctrl+S를 눌러주세요.`,
+      );
+    setProfileFileWriteReady(true);
+  };
   const writeEncryptedProfile = async (
     handle: ProfileFileHandle,
     content: string,
   ) => {
+    await ensureProfileWritePermission(handle);
     const writable = await handle.createWritable();
     await writable.write(content);
     await writable.close();
   };
-  const exportEncryptedProfile = async () => {
+  const suggestedProfileFileName = () => {
+    const date = new Date().toISOString().slice(0, 10).replaceAll('-', '');
+    return `부부연금종합시뮬레이터_암호화프로필_${date}.json`;
+  };
+  const closeProfileDialog = () => {
+    setProfileDialogMode(null);
+    setProfileDialogFileName('');
+    setProfileDialogPassword('');
+    setProfileDialogPasswordConfirm('');
+    setSaveAsCurrentPassword('');
+    setSaveAsNewPassword('');
+    setSaveAsNewPasswordConfirm('');
+    setShowProfileDialogPasswords(false);
+    setProfileDialogError('');
+    setPendingProfileFile(null);
+    pendingProfileFileHandle.current = null;
+  };
+  const openNewProfileSaveDialog = () => {
+    setProfileDialogFileName(suggestedProfileFileName());
+    setProfileDialogPassword('');
+    setProfileDialogPasswordConfirm('');
+    setShowProfileDialogPasswords(false);
+    setProfileDialogError('');
+    setProfileDialogMode('save');
+  };
+  const openSaveAsProfileDialog = () => {
+    if (!profileFileName || !profileFilePassword.current) {
+      setMessage('먼저 암호화 JSON 파일을 저장하거나 불러오세요.');
+      return;
+    }
+    const date = new Date().toISOString().slice(0, 10).replaceAll('-', '');
+    const baseName =
+      profileFileName.replace(/\.json$/i, '') ||
+      '부부연금종합시뮬레이터_암호화프로필';
+    setProfileDialogFileName(`${baseName}_사본_${date}.json`);
+    setSaveAsCurrentPassword('');
+    setSaveAsNewPassword('');
+    setSaveAsNewPasswordConfirm('');
+    setShowProfileDialogPasswords(false);
+    setProfileDialogError('');
+    setProfileDialogMode('save-as');
+  };
+  const exportEncryptedProfile = async (options?: {
+    password?: string;
+    suggestedName?: string;
+    forceNew?: boolean;
+  }) => {
     try {
       const encryptionPassword =
-        password.length >= 8 ? password : profileFilePassword.current;
-      if (encryptionPassword.length < 8)
-        throw new Error('파일을 저장할 암호를 8자 이상 입력하세요.');
-      let handle = profileFileHandle.current;
-      if (!handle) {
+        options?.password ?? profileFilePassword.current;
+      if (encryptionPassword.length < 8) {
+        openNewProfileSaveDialog();
+        return false;
+      }
+      let handle = options?.forceNew ? null : profileFileHandle.current;
+      if (
+        !handle &&
+        (options?.forceNew === true || profileFileMode !== 'download')
+      ) {
         const picker = (window as FilePickerWindow).showSaveFilePicker;
         if (picker) {
-          const date = new Date()
-            .toISOString()
-            .slice(0, 10)
-            .replaceAll('-', '');
           handle = await picker({
-            suggestedName: `부부연금종합시뮬레이터_암호화프로필_${date}.json`,
+            suggestedName:
+              options?.suggestedName || suggestedProfileFileName(),
             types: encryptedProfileFileTypes,
           });
         }
@@ -5000,31 +6526,74 @@ export default function Home() {
         profileFileHandle.current = handle;
         profileFilePassword.current = encryptionPassword;
         setProfileFileName(handle.name);
+        setProfileFileMode('direct');
         setPassword('');
         setMessage(
-          profileFileName
+          profileFileName && !options?.forceNew
             ? `${handle.name}에 현재 내용을 바로 저장했습니다.`
             : `${handle.name}에 저장하고 현재 탭과 연결했습니다. 이제 Ctrl+S로 바로 저장할 수 있습니다.`,
         );
-        return;
+        markProfileSaved('json');
+        return true;
       }
       const blob = new Blob([content], { type: 'application/json' });
       const link = document.createElement('a');
       link.href = URL.createObjectURL(blob);
       const date = new Date().toISOString().slice(0, 10).replaceAll('-', '');
-      link.download = `부부연금종합시뮬레이터_암호화프로필_${date}.json`;
+      const downloadName =
+        options?.suggestedName ||
+        profileFileName ||
+        `부부연금종합시뮬레이터_암호화프로필_${date}.json`;
+      link.download = downloadName;
       link.click();
       URL.revokeObjectURL(link.href);
+      profileFilePassword.current = encryptionPassword;
+      setProfileFileName(downloadName);
+      setProfileFileMode('download');
+      setProfileFileWriteReady(false);
       setPassword('');
       setMessage(
-        '전체 입력값을 암호화 JSON 파일로 내려받았습니다. 이 브라우저에서는 같은 파일 바로 저장을 지원하지 않습니다.',
+        profileFileName && !options?.forceNew
+          ? `${downloadName} 이름으로 현재 내용을 다시 내려받았습니다.`
+          : `${downloadName}을 내려받고 Ctrl+S 작업 파일로 기억했습니다. 이 브라우저는 원본 직접 덮어쓰기를 지원하지 않아 같은 이름으로 다시 내려받습니다.`,
       );
+      markProfileSaved('json');
+      return true;
     } catch (error) {
       setMessage(
         error instanceof DOMException && error.name === 'AbortError'
           ? '파일 저장을 취소했습니다.'
           : (error as Error).message,
       );
+      return false;
+    }
+  };
+  const saveEncryptedProfileAs = async () => {
+    try {
+      if (!profileFileName || !profileFilePassword.current)
+        throw new Error('먼저 암호화 JSON 파일을 저장하거나 불러오세요.');
+      if (saveAsCurrentPassword.length < 8)
+        throw new Error('현재 파일 암호를 8자 이상 입력하세요.');
+      if (saveAsCurrentPassword !== profileFilePassword.current)
+        throw new Error('현재 파일 암호가 일치하지 않습니다.');
+      if (saveAsNewPassword.length < 8)
+        throw new Error('새 파일 암호를 8자 이상 입력하세요.');
+      if (saveAsNewPassword === saveAsCurrentPassword)
+        throw new Error('새 파일 암호는 현재 암호와 다르게 입력하세요.');
+      if (saveAsNewPassword !== saveAsNewPasswordConfirm)
+        throw new Error('새 파일 암호 확인이 일치하지 않습니다.');
+      if (!profileDialogFileName.trim())
+        throw new Error('새 파일명을 입력하세요.');
+      const saved = await exportEncryptedProfile({
+        password: saveAsNewPassword,
+        suggestedName: profileDialogFileName.trim().endsWith('.json')
+          ? profileDialogFileName.trim()
+          : `${profileDialogFileName.trim()}.json`,
+        forceNew: true,
+      });
+      if (saved) closeProfileDialog();
+    } catch (error) {
+      setProfileDialogError((error as Error).message);
     }
   };
   const exportAiAnalysisMarkdown = () => {
@@ -5057,58 +6626,76 @@ export default function Home() {
     }
   };
   useEffect(() => {
-    saveProfileShortcut.current = exportEncryptedProfile;
+    saveProfileShortcut.current = async () => {
+      await exportEncryptedProfile();
+    };
   });
   useEffect(() => {
     const saveFromKeyboard = (event: KeyboardEvent) => {
       if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 's')
         return;
       event.preventDefault();
-      if (!profileFileHandle.current) {
-        const moveToStorage = window.confirm(
-          "신규 저장하거나 기존 파일을 열으셔야 합니다.\n\n4번 '정책·보안 관리' 탭으로 이동할까요?",
-        );
-        if (moveToStorage) {
-          setTab('privacy');
-          setMessage(
-            '암호를 입력한 뒤 JSON 파일을 새로 저장하거나 기존 파일을 불러오세요.',
-          );
-        }
+      if (
+        !profileFileHandle.current &&
+        !profileFileName &&
+        !profileFilePassword.current
+      ) {
+        setTab('privacy');
+        openNewProfileSaveDialog();
         return;
       }
       void saveProfileShortcut.current();
     };
     window.addEventListener('keydown', saveFromKeyboard);
     return () => window.removeEventListener('keydown', saveFromKeyboard);
-  }, []);
+  }, [profileFileName]);
   const restoreEncryptedProfile = async (
     file: File,
     handle: ProfileFileHandle | null,
+    decryptionPassword: string,
   ) => {
-    if (password.length < 8)
+    if (decryptionPassword.length < 8)
       throw new Error('파일을 불러올 암호를 8자 이상 입력하세요.');
     const saved = await readEncryptedProfileFile<SavedProfile>(
       JSON.parse(await file.text()),
-      password,
+      decryptionPassword,
     );
     applySavedProfile(saved);
     if (handle) {
       profileFileHandle.current = handle;
-      profileFilePassword.current = password;
+      profileFilePassword.current = decryptionPassword;
       setProfileFileName(handle.name);
+      setProfileFileMode('direct');
+      const permission = await queryProfileWritePermission(handle);
+      setProfileFileWriteReady(permission === 'granted');
+    } else {
+      profileFileHandle.current = null;
+      profileFilePassword.current = decryptionPassword;
+      setProfileFileName(file.name);
+      setProfileFileMode('download');
+      setProfileFileWriteReady(false);
     }
-    setPassword('');
     setMessage(
       handle
         ? `${file.name}을 복원하고 현재 탭과 연결했습니다. 다음 저장부터 이 파일에 바로 저장합니다.`
-        : `${file.name}의 전체 프로필을 복원했습니다.`,
+        : `${file.name}의 전체 프로필을 복원하고 Ctrl+S 작업 파일로 기억했습니다. 이 브라우저에서는 같은 이름으로 즉시 다시 내려받습니다.`,
     );
+    markProfileSaved('json');
+  };
+  const prepareEncryptedProfileLoad = (
+    file: File,
+    handle: ProfileFileHandle | null,
+  ) => {
+    setPendingProfileFile(file);
+    pendingProfileFileHandle.current = handle;
+    setProfileDialogFileName(file.name);
+    setProfileDialogPassword('');
+    setProfileDialogPasswordConfirm('');
+    setShowProfileDialogPasswords(false);
+    setProfileDialogError('');
+    setProfileDialogMode('load');
   };
   const chooseEncryptedProfile = async () => {
-    if (password.length < 8) {
-      setMessage('파일을 불러올 암호를 8자 이상 입력하세요.');
-      return;
-    }
     const picker = (window as FilePickerWindow).showOpenFilePicker;
     if (!picker) {
       profileInput.current?.click();
@@ -5120,17 +6707,7 @@ export default function Home() {
         types: encryptedProfileFileTypes,
       });
       if (!handle) return;
-      const permission = handle.requestPermission
-        ? await handle.requestPermission({ mode: 'readwrite' })
-        : 'granted';
-      await restoreEncryptedProfile(
-        await handle.getFile(),
-        permission === 'granted' ? handle : null,
-      );
-      if (permission !== 'granted')
-        setMessage(
-          `${handle.name}을 복원했지만 쓰기 권한이 없어 바로 저장 연결은 하지 못했습니다.`,
-        );
+      prepareEncryptedProfileLoad(await handle.getFile(), handle);
     } catch (error) {
       setMessage(
         error instanceof DOMException && error.name === 'AbortError'
@@ -5146,44 +6723,371 @@ export default function Home() {
   ) => {
     const file = event.target.files?.[0];
     if (!file) return;
+    prepareEncryptedProfileLoad(file, null);
+    event.target.value = '';
+  };
+  const confirmProfileDialog = async () => {
+    setProfileDialogError('');
     try {
-      await restoreEncryptedProfile(file, null);
+      if (profileDialogMode === 'load') {
+        if (!pendingProfileFile)
+          throw new Error('불러올 JSON 파일을 다시 선택하세요.');
+        await restoreEncryptedProfile(
+          pendingProfileFile,
+          pendingProfileFileHandle.current,
+          profileDialogPassword,
+        );
+        closeProfileDialog();
+        return;
+      }
+      if (profileDialogMode === 'save') {
+        if (!profileDialogFileName.trim())
+          throw new Error('저장할 파일명을 입력하세요.');
+        if (profileDialogPassword.length < 8)
+          throw new Error('파일 암호를 8자 이상 입력하세요.');
+        if (profileDialogPassword !== profileDialogPasswordConfirm)
+          throw new Error('파일 암호 확인이 일치하지 않습니다.');
+        const saved = await exportEncryptedProfile({
+          password: profileDialogPassword,
+          suggestedName: profileDialogFileName.trim().endsWith('.json')
+            ? profileDialogFileName.trim()
+            : `${profileDialogFileName.trim()}.json`,
+          forceNew: true,
+        });
+        if (saved) closeProfileDialog();
+        return;
+      }
+      if (profileDialogMode === 'save-as')
+        await saveEncryptedProfileAs();
     } catch (error) {
-      setMessage(
+      setProfileDialogError(
         error instanceof SyntaxError
           ? 'JSON 파일 형식이 올바르지 않습니다.'
           : (error as Error).message,
       );
-    } finally {
-      event.target.value = '';
     }
   };
-  const importPolicy = async (event: ChangeEvent<HTMLInputElement>) => {
+  const exportPolicyUpdateMarkdown = () => {
+    const content = buildPolicyUpdateMarkdown(
+      policy,
+      form.householdFinance.realEstateCostPolicy ??
+        DEFAULT_REAL_ESTATE_COST_POLICY,
+    );
+    const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    const date = new Date().toISOString().slice(0, 10).replaceAll('-', '');
+    link.download = `부부연금_통합정책_AI업데이트요청_${date}.md`;
+    link.click();
+    URL.revokeObjectURL(link.href);
+    setMessage(
+      '연금·부동산 통합 정책 업데이트 요청 Markdown을 내려받았습니다.',
+    );
+  };
+  const importPolicyUpdateMarkdown = async (
+    event: ChangeEvent<HTMLInputElement>,
+  ) => {
     const file = event.target.files?.[0];
     if (!file) return;
     try {
-      setPolicy(validatePolicy(JSON.parse(await file.text())));
-      setMessage(`${file.name} 정책을 적용했습니다.`);
-    } catch (e) {
-      setMessage((e as Error).message);
+      const updatePackage = parsePolicyUpdateMarkdown(await file.text());
+      setPendingPolicyUpdate(updatePackage);
+      setMessage(
+        `${file.name}을 검증했습니다. 아래 변경 요약과 출처를 확인한 뒤 적용하세요.`,
+      );
+    } catch (error) {
+      setPendingPolicyUpdate(null);
+      setMessage((error as Error).message);
     } finally {
       event.target.value = '';
     }
   };
-  const exportPolicy = () => {
-    const blob = new Blob([JSON.stringify(policy, null, 2)], {
-      type: 'application/json',
-    });
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
-    link.download = `${policy.policyId}.json`;
-    link.click();
-    URL.revokeObjectURL(link.href);
+  const applyPendingPolicyUpdate = () => {
+    if (!pendingPolicyUpdate) return;
+    const nextPensionPolicy = validatePolicy(pendingPolicyUpdate.pensionPolicy);
+    const nextRealEstatePolicy = validateRealEstateCostPolicy(
+      pendingPolicyUpdate.realEstatePolicy,
+    );
+    setPolicy(nextPensionPolicy);
+    setForm((previous) => ({
+      ...previous,
+      householdFinance: {
+        ...previous.householdFinance,
+        realEstateCostPolicy: nextRealEstatePolicy,
+      },
+    }));
+    setPendingPolicyUpdate(null);
+    setMessage(
+      `${nextPensionPolicy.policyId} · ${nextRealEstatePolicy.policyId} 정책을 함께 적용했습니다.`,
+    );
   };
+  const saveStatusLabel = hasUnsavedChanges
+    ? '저장되지 않은 변경 있음'
+    : lastSaveKind === 'json'
+      ? `JSON 저장됨${profileFileName ? ` · ${profileFileName}` : ''}`
+      : lastSaveKind === 'session'
+        ? '임시 저장됨'
+        : sessionExists
+          ? '복원 가능한 임시 저장 있음'
+          : '저장 기록 없음';
+  const saveStatusTitle = lastSavedAt
+    ? `마지막 저장 ${lastSavedAt.toLocaleTimeString('ko-KR', {
+        hour: '2-digit',
+        minute: '2-digit',
+      })}`
+    : saveStatusLabel;
 
   return (
-    <main className="min-h-screen bg-[#f3f7fb] text-slate-950">
-      <header className="border-b border-slate-800 bg-[#091525] text-white">
+    <main className="min-h-screen max-w-full overflow-x-clip bg-[#f3f7fb] text-slate-950">
+      <Dialog
+        open={profileDialogMode !== null}
+        onOpenChange={(open) => {
+          if (!open) closeProfileDialog();
+        }}
+      >
+        <DialogContent
+          className={`max-h-[calc(100vh-2rem)] overflow-y-auto border-2 sm:max-w-lg ${
+            profileDialogMode === 'load'
+              ? 'border-emerald-400'
+              : profileDialogMode === 'save-as'
+                ? 'border-violet-400'
+                : 'border-blue-400'
+          }`}
+        >
+          <DialogHeader>
+            <DialogTitle
+              className={`flex items-center gap-2 text-lg font-black ${
+                profileDialogMode === 'load'
+                  ? 'text-emerald-900'
+                  : profileDialogMode === 'save-as'
+                    ? 'text-violet-900'
+                    : 'text-blue-900'
+              }`}
+            >
+              {profileDialogMode === 'load' ? (
+                <Upload className="size-5" />
+              ) : profileDialogMode === 'save-as' ? (
+                <FilePlus2 className="size-5" />
+              ) : (
+                <Save className="size-5" />
+              )}
+              {profileDialogMode === 'load'
+                ? '암호화 JSON 파일 열기'
+                : profileDialogMode === 'save-as'
+                  ? '다른 이름·새 암호로 저장'
+                  : '암호화 JSON 파일 저장'}
+            </DialogTitle>
+            <DialogDescription>
+              {profileDialogMode === 'load'
+                ? '선택한 파일의 암호를 입력하고 확인을 누르면 전체 프로필을 복원합니다.'
+                : profileDialogMode === 'save-as'
+                  ? '파일명과 새 암호를 확인한 뒤 Windows 저장 창에서 새 위치를 선택합니다.'
+                  : '파일명과 8자 이상의 암호를 입력한 뒤 Windows 저장 창에서 위치를 선택합니다.'}
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="grid gap-4">
+            {profileDialogMode === 'save-as' && (
+              <div className="rounded-lg border border-violet-200 bg-violet-50 px-3 py-2 text-xs text-violet-900">
+                <span className="font-bold">현재 파일</span>
+                <span className="mt-1 block break-all">{profileFileName}</span>
+              </div>
+            )}
+            <label className="grid gap-1.5">
+              <span className="field-label">
+                {profileDialogMode === 'load' ? '선택한 파일' : '파일명'}
+              </span>
+              <Input
+                value={profileDialogFileName}
+                readOnly={profileDialogMode === 'load'}
+                className={
+                  profileDialogMode === 'load'
+                    ? 'border-emerald-200 bg-emerald-50 font-bold text-emerald-950'
+                    : 'bg-white'
+                }
+                onChange={(event) =>
+                  setProfileDialogFileName(event.target.value)
+                }
+              />
+            </label>
+
+            {profileDialogMode === 'save-as' ? (
+              <>
+                <label className="grid gap-1.5">
+                  <span className="field-label">현재 파일 암호</span>
+                  <Input
+                    type={showProfileDialogPasswords ? 'text' : 'password'}
+                    autoComplete="current-password"
+                    value={saveAsCurrentPassword}
+                    placeholder="현재 암호 8자 이상"
+                    onChange={(event) =>
+                      setSaveAsCurrentPassword(event.target.value)
+                    }
+                  />
+                </label>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <label className="grid gap-1.5">
+                    <span className="field-label">새 파일 암호</span>
+                    <Input
+                      type={showProfileDialogPasswords ? 'text' : 'password'}
+                      autoComplete="new-password"
+                      value={saveAsNewPassword}
+                      placeholder="새 암호 8자 이상"
+                      onChange={(event) =>
+                        setSaveAsNewPassword(event.target.value)
+                      }
+                    />
+                  </label>
+                  <label className="grid gap-1.5">
+                    <span className="field-label">새 파일 암호 확인</span>
+                    <Input
+                      type={showProfileDialogPasswords ? 'text' : 'password'}
+                      autoComplete="new-password"
+                      value={saveAsNewPasswordConfirm}
+                      placeholder="새 암호 다시 입력"
+                      onChange={(event) =>
+                        setSaveAsNewPasswordConfirm(event.target.value)
+                      }
+                    />
+                  </label>
+                </div>
+              </>
+            ) : (
+              <div
+                className={`grid gap-3 ${profileDialogMode === 'save' ? 'sm:grid-cols-2' : ''}`}
+              >
+                <label className="grid gap-1.5">
+                  <span className="field-label">파일 암호</span>
+                  <Input
+                    type={showProfileDialogPasswords ? 'text' : 'password'}
+                    autoComplete={
+                      profileDialogMode === 'load'
+                        ? 'current-password'
+                        : 'new-password'
+                    }
+                    value={profileDialogPassword}
+                    placeholder="8자 이상 암호"
+                    onChange={(event) =>
+                      setProfileDialogPassword(event.target.value)
+                    }
+                    onKeyDown={(event) => {
+                      if (
+                        event.key === 'Enter' &&
+                        profileDialogMode === 'load' &&
+                        profileDialogPassword.length >= 8
+                      )
+                        void confirmProfileDialog();
+                    }}
+                  />
+                </label>
+                {profileDialogMode === 'save' && (
+                  <label className="grid gap-1.5">
+                    <span className="field-label">파일 암호 확인</span>
+                    <Input
+                      type={showProfileDialogPasswords ? 'text' : 'password'}
+                      autoComplete="new-password"
+                      value={profileDialogPasswordConfirm}
+                      placeholder="암호 다시 입력"
+                      onChange={(event) =>
+                        setProfileDialogPasswordConfirm(event.target.value)
+                      }
+                    />
+                  </label>
+                )}
+              </div>
+            )}
+
+            <label
+              className={`flex items-center gap-2 text-xs font-semibold ${
+                profileDialogMode === 'load'
+                  ? 'text-emerald-900'
+                  : profileDialogMode === 'save-as'
+                    ? 'text-violet-900'
+                    : 'text-blue-900'
+              }`}
+            >
+              <Checkbox
+                checked={showProfileDialogPasswords}
+                onCheckedChange={(value) =>
+                  setShowProfileDialogPasswords(value === true)
+                }
+              />
+              입력한 암호 표시
+            </label>
+            {profileDialogError && (
+              <p className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-bold text-rose-800">
+                {profileDialogError}
+              </p>
+            )}
+            {(profileDialogMode === 'save' ||
+              profileDialogMode === 'save-as') && (
+              <div
+                className={`rounded-lg border px-3 py-2 text-xs font-semibold leading-5 ${
+                  profileDialogMode === 'save-as'
+                    ? 'border-violet-200 bg-violet-50 text-violet-900'
+                    : 'border-blue-200 bg-blue-50 text-blue-900'
+                }`}
+              >
+                아래 ‘저장 위치 선택 후 저장’을 누르면 Windows 파일 저장 창이
+                열립니다. 그 창에서 폴더와 파일명을 최종 지정할 수 있습니다.
+                파일 직접 저장을 지원하지 않는 브라우저에서는 브라우저의 기본
+                다운로드 위치를 사용합니다.
+              </div>
+            )}
+            <p className="text-xs leading-5 text-slate-500">
+              암호는 저장되지 않으며, 잊으면 이 파일을 복구할 수 없습니다.
+            </p>
+          </div>
+
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={closeProfileDialog}>
+              취소
+            </Button>
+            <Button
+              type="button"
+              className={
+                profileDialogMode === 'load'
+                  ? 'bg-emerald-700 font-bold hover:bg-emerald-800'
+                  : profileDialogMode === 'save-as'
+                    ? 'bg-violet-700 font-bold hover:bg-violet-800'
+                    : 'bg-blue-700 font-bold hover:bg-blue-800'
+              }
+              disabled={
+                profileDialogMode === 'load'
+                  ? profileDialogPassword.length < 8
+                  : profileDialogMode === 'save-as'
+                    ? saveAsCurrentPassword.length < 8 ||
+                      saveAsNewPassword.length < 8 ||
+                      saveAsNewPasswordConfirm.length < 8 ||
+                      saveAsNewPassword !== saveAsNewPasswordConfirm ||
+                      !profileDialogFileName.trim()
+                    : profileDialogPassword.length < 8 ||
+                      profileDialogPasswordConfirm.length < 8 ||
+                      profileDialogPassword !== profileDialogPasswordConfirm ||
+                      !profileDialogFileName.trim()
+              }
+              onClick={() => void confirmProfileDialog()}
+            >
+              {profileDialogMode === 'load' ? (
+                <Upload />
+              ) : profileDialogMode === 'save-as' ? (
+                <FilePlus2 />
+              ) : (
+                <Save />
+              )}
+              {profileDialogMode === 'load'
+                ? '확인하고 열기'
+                : profileDialogMode === 'save-as'
+                  ? '저장 위치 선택 후 사본 저장'
+                  : '저장 위치 선택 후 저장'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <header
+        data-print="hide"
+        className="border-b border-slate-800 bg-[#091525] text-white"
+      >
         <div className="mx-auto flex max-w-[1480px] flex-wrap items-center justify-between gap-4 px-5 py-5 lg:px-9">
           <div>
             <p className="text-xl font-bold tracking-tight">
@@ -5194,13 +7098,39 @@ export default function Home() {
               없음
             </p>
           </div>
-          <Badge className="h-8 bg-emerald-950 px-3 text-emerald-200">
-            <ShieldCheck /> 개인정보 로컬 처리
-          </Badge>
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <Badge
+              title={saveStatusTitle}
+              className={`h-8 max-w-[min(26rem,80vw)] gap-2 px-3 ${
+                hasUnsavedChanges
+                  ? 'bg-amber-300 text-amber-950'
+                  : lastSaveKind === 'json'
+                    ? 'bg-blue-600 text-white'
+                    : lastSaveKind === 'session' || sessionExists
+                      ? 'bg-violet-600 text-white'
+                      : 'bg-slate-700 text-slate-100'
+              }`}
+            >
+              {hasUnsavedChanges ? (
+                <span className="size-2 shrink-0 animate-pulse rounded-full bg-amber-950" />
+              ) : lastSaveKind === 'session' || sessionExists ? (
+                <LockKeyhole className="size-3.5 shrink-0" />
+              ) : (
+                <Save className="size-3.5 shrink-0" />
+              )}
+              <span className="truncate">{saveStatusLabel}</span>
+            </Badge>
+            <Badge className="h-8 bg-emerald-950 px-3 text-emerald-200">
+              <ShieldCheck /> 개인정보 로컬 처리
+            </Badge>
+          </div>
         </div>
       </header>
-      <div className="mx-auto max-w-[1480px] px-4 py-5 lg:px-9">
-        <section className="mb-4 flex flex-col gap-3 rounded-xl border border-blue-200 bg-blue-50 p-4 text-sm text-blue-950 sm:flex-row sm:items-center sm:justify-between">
+      <div className="mx-auto w-full min-w-0 max-w-[1480px] px-4 py-5 lg:px-9">
+        <section
+          data-print="hide"
+          className="mb-4 flex flex-col gap-3 rounded-xl border border-blue-200 bg-blue-50 p-4 text-sm text-blue-950 sm:flex-row sm:items-center sm:justify-between"
+        >
           <div className="flex gap-3">
             <LockKeyhole className="mt-0.5 size-5 shrink-0 text-blue-700" />
             <div>
@@ -5216,6 +7146,7 @@ export default function Home() {
         </section>
         {message && (
           <output
+            data-print="hide"
             aria-live="polite"
             className="mb-4 flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm shadow-sm"
           >
@@ -5230,9 +7161,14 @@ export default function Home() {
             </button>
           </output>
         )}
-        <HouseholdBasicInfo form={form} policy={policy} update={update} />
+        <div data-print="hide">
+          <HouseholdBasicInfo form={form} policy={policy} update={update} />
+        </div>
         <Tabs value={tab} onValueChange={setTab}>
-          <TabsList className="mb-7 grid min-h-16 w-full grid-cols-2 gap-2 rounded-xl border border-slate-200 bg-white p-2 shadow-sm md:grid-cols-5">
+          <TabsList
+            data-print="hide"
+            className="mb-7 grid min-h-16 w-full grid-cols-2 gap-2 rounded-xl border border-slate-200 bg-white p-2 shadow-sm md:grid-cols-5"
+          >
             <TabsTrigger
               value="input"
               className="min-h-12 rounded-lg border border-blue-100 bg-blue-50 px-4 py-3 text-sm font-black text-blue-800 hover:bg-blue-100 data-active:border-blue-700 data-active:bg-blue-700 data-active:text-white"
@@ -5361,8 +7297,30 @@ export default function Home() {
               </Button>
             </div>
           </TabsContent>
-          <TabsContent value="report" className="grid gap-5">
-            <div className="flex flex-wrap items-end justify-between gap-4">
+          <TabsContent
+            value="report"
+            className="grid w-full min-w-0 max-w-full gap-5"
+          >
+            <div
+              data-print="only"
+              className="hidden border-b-2 border-slate-900 pb-3"
+            >
+              <p className="text-xs font-bold text-slate-600">
+                정책 {policy.policyId} · 출력일{' '}
+                {new Date().toLocaleDateString('ko-KR')}
+              </p>
+              <h1 className="mt-1 text-2xl font-black">
+                부부 연금·은퇴 종합 분석 보고서
+              </h1>
+              <p className="mt-1 text-xs text-slate-600">
+                입력 조건에 따른 연금·생활비·자산·부채와 주요 사건별 현금흐름
+                분석
+              </p>
+            </div>
+            <div
+              data-print="hide"
+              className="flex flex-wrap items-end justify-between gap-4"
+            >
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.14em] text-blue-700">
                   한 화면에서 조건 선택
@@ -5371,108 +7329,159 @@ export default function Home() {
                   국민·기초·개인·퇴직연금과 유족연금을 함께 비교합니다
                 </h1>
               </div>
-              <div className="grid grid-cols-2 gap-2">
-                <Button
-                  size="lg"
-                  variant="outline"
-                  className="h-11 w-40 border-slate-300 bg-white font-bold"
-                  onClick={() => window.print()}
-                >
-                  <Printer /> 인쇄
-                </Button>
-                <Button
-                  size="lg"
-                  className="h-11 w-40 bg-blue-700 font-bold hover:bg-blue-800"
-                  disabled={!canSimulate}
-                  onClick={run}
-                >
-                  지금 다시 계산
-                </Button>
+              <div className="ml-auto grid justify-items-end gap-2">
+                <div className="flex flex-wrap justify-end gap-2">
+                  <Button
+                    size="lg"
+                    variant="outline"
+                    className="h-11 w-40 border-slate-300 bg-white font-bold"
+                    onClick={() => window.print()}
+                  >
+                    <Printer /> 인쇄
+                  </Button>
+                  <Button
+                    size="lg"
+                    className="h-11 w-40 bg-blue-700 font-bold hover:bg-blue-800"
+                    disabled={!canSimulate}
+                    onClick={run}
+                  >
+                    지금 다시 계산
+                  </Button>
+                </div>
+                <p className="max-w-[21rem] text-right text-[11px] leading-4 text-slate-500">
+                  인쇄 설정에서 ‘머리글과 바닥글’을 끄면 파일 경로와 페이지 번호가
+                  나오지 않습니다.
+                </p>
               </div>
             </div>
-            <Card className="border-violet-200 bg-violet-50/60">
-              <CardContent className="flex flex-col gap-4 py-5 sm:flex-row sm:items-center sm:justify-between">
-                <div className="flex gap-3">
-                  <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-violet-700 text-white">
+            <Card
+              data-print="hide"
+              className="overflow-hidden border-2 border-violet-400 bg-gradient-to-br from-violet-50 via-white to-blue-50 shadow-md"
+            >
+              <CardContent className="grid gap-5 py-6 lg:grid-cols-[1fr_auto] lg:items-center">
+                <div className="grid gap-4">
+                  <div className="flex gap-3">
+                    <div className="flex size-12 shrink-0 items-center justify-center rounded-xl bg-violet-700 text-white shadow-sm">
                     <FileText className="size-5" />
+                    </div>
+                    <div>
+                      <Badge className="mb-1 bg-violet-700 text-white">
+                        계산 결과를 AI와 함께 점검
+                      </Badge>
+                      <p className="text-lg font-black text-violet-950">
+                        AI 상담용 종합 현황을 저장하세요
+                      </p>
+                      <p className="mt-1 max-w-4xl text-sm leading-6 text-violet-900">
+                        연금액만 전달하는 파일이 아니라, 은퇴·연금 개시·주택 매각과
+                        대출상환·자산 인출 전후 부족·현금잔액 변화를 한 번에 담아
+                        AI가 <b>언제 무엇을 준비해야 하는지</b> 분석할 수 있게 합니다.
+                      </p>
+                    </div>
                   </div>
-                  <div>
-                    <p className="font-black text-violet-950">
-                      AI에게 질문할 종합 현황 만들기
-                    </p>
-                    <p className="mt-1 max-w-3xl text-xs leading-5 text-violet-800">
-                      현재 입력 조건, 연금별 계산 결과, 은퇴·연금 개시 사건과
-                      생활비 부족 기간을 AI가 읽기 좋은 Markdown으로 정리합니다.
-                      생년월일 전체와 암호는 제외하지만 금액 정보가 담긴 평문
-                      파일이므로 공유 전에 내용을 확인하세요.
-                    </p>
+                  <ol className="grid gap-2 text-xs leading-5 text-slate-700 sm:grid-cols-3">
+                    {[
+                      ['1', '계산 확정', '입력값을 확인한 뒤 ‘지금 다시 계산’을 누릅니다.'],
+                      ['2', 'MD 저장', '오른쪽 버튼으로 최신 계산 결과를 내려받습니다.'],
+                      ['3', 'AI에 첨부', '새 대화에 MD를 첨부하고 아래 예시처럼 질문합니다.'],
+                    ].map(([step, title, description]) => (
+                      <li
+                        key={step}
+                        className="flex gap-2 rounded-lg border border-violet-200 bg-white/90 p-3"
+                      >
+                        <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-violet-700 font-black text-white">
+                          {step}
+                        </span>
+                        <span>
+                          <b className="block text-violet-950">{title}</b>
+                          {description}
+                        </span>
+                      </li>
+                    ))}
+                  </ol>
+                  <div className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs leading-5 text-blue-950">
+                    <b>AI 질문 예시</b> · “이 파일을 기준으로 핵심 결론, 시점별로
+                    필요한 행동, 자산 인출 전후 부족, 현금 고갈 위험과 민감도를
+                    순서대로 설명해줘.”
                   </div>
+                  <p className="text-[11px] leading-5 text-rose-700">
+                    금액·자산 정보가 포함된 암호화되지 않은 평문 파일입니다.
+                    생년월일 전체와 저장 암호는 제외되지만 외부 공유 전 내용을
+                    확인하세요.
+                  </p>
                 </div>
-                <Button
-                  type="button"
-                  className="shrink-0 bg-violet-700 font-bold hover:bg-violet-800"
-                  disabled={!result}
-                  onClick={exportAiAnalysisMarkdown}
-                >
-                  <Download /> AI 상담용 MD 저장
-                </Button>
+                <div className="grid gap-2 lg:min-w-56">
+                  <Button
+                    type="button"
+                    size="lg"
+                    className="h-13 shrink-0 bg-violet-700 px-6 text-base font-black shadow-md hover:bg-violet-800"
+                    disabled={!result}
+                    onClick={exportAiAnalysisMarkdown}
+                  >
+                    <Download /> AI 상담용 MD 저장
+                  </Button>
+                  <span className="text-center text-[11px] font-semibold text-violet-800">
+                    현재 화면의 최신 계산 결과로 생성
+                  </span>
+                </div>
               </CardContent>
             </Card>
-            <HouseholdRetirementSettings
-              people={{ a: form.a, b: form.b }}
-              netReturnRate={form.plannerNetReturnRate}
-              setPerson={(owner, patch) =>
-                setForm((prev) => ({
-                  ...prev,
-                  [owner]: { ...prev[owner], ...patch },
-                }))
-              }
-              setNetReturnRate={(plannerNetReturnRate) =>
-                setForm((prev) => ({ ...prev, plannerNetReturnRate }))
-              }
-              includeLateLifeGap={form.includeLateLifeGap}
-              setIncludeLateLifeGap={(includeLateLifeGap) =>
-                setForm((prev) => ({ ...prev, includeLateLifeGap }))
-              }
-            />
-            <NpsInflationControls
-              settings={form.npsInflation}
-              setSettings={(npsInflation) =>
-                setForm((prev) => ({ ...prev, npsInflation }))
-              }
-            />
-            <section className="grid gap-5 xl:grid-cols-2">
-              <StrategyCard
-                person={form.a}
-                policy={policy}
-                setPerson={(p) => update('a', p)}
+            <div data-print="hide" className="grid gap-5">
+              <HouseholdRetirementSettings
+                people={{ a: form.a, b: form.b }}
+                netReturnRate={form.plannerNetReturnRate}
+                setPerson={(owner, patch) =>
+                  setForm((prev) => ({
+                    ...prev,
+                    [owner]: { ...prev[owner], ...patch },
+                  }))
+                }
+                setNetReturnRate={(plannerNetReturnRate) =>
+                  setForm((prev) => ({ ...prev, plannerNetReturnRate }))
+                }
+                includeLateLifeGap={form.includeLateLifeGap}
+                setIncludeLateLifeGap={(includeLateLifeGap) =>
+                  setForm((prev) => ({ ...prev, includeLateLifeGap }))
+                }
               />
-              <StrategyCard
-                person={form.b}
-                policy={policy}
-                setPerson={(p) => update('b', p)}
+              <NpsInflationControls
+                settings={form.npsInflation}
+                setSettings={(npsInflation) =>
+                  setForm((prev) => ({ ...prev, npsInflation }))
+                }
               />
-            </section>
-            <AdditionalPensionStrategyControls
-              accounts={form.additionalPensions}
-              people={{ a: form.a, b: form.b }}
-              policy={policy}
-              setAccounts={(additionalPensions) =>
-                setForm((prev) => ({ ...prev, additionalPensions }))
-              }
-            />
-            <PublicPensionAndLivingCostControls
-              people={{ a: form.a, b: form.b }}
-              policy={policy}
-              basicPension={form.basicPension}
-              livingCost={form.livingCost}
-              setBasicPension={(basicPension) =>
-                setForm((prev) => ({ ...prev, basicPension }))
-              }
-              setLivingCost={(livingCost) =>
-                setForm((prev) => ({ ...prev, livingCost }))
-              }
-            />
+              <section className="grid gap-5 xl:grid-cols-2">
+                <StrategyCard
+                  person={form.a}
+                  policy={policy}
+                  setPerson={(p) => update('a', p)}
+                />
+                <StrategyCard
+                  person={form.b}
+                  policy={policy}
+                  setPerson={(p) => update('b', p)}
+                />
+              </section>
+              <AdditionalPensionStrategyControls
+                accounts={form.additionalPensions}
+                people={{ a: form.a, b: form.b }}
+                policy={policy}
+                setAccounts={(additionalPensions) =>
+                  setForm((prev) => ({ ...prev, additionalPensions }))
+                }
+              />
+              <PublicPensionAndLivingCostControls
+                people={{ a: form.a, b: form.b }}
+                policy={policy}
+                basicPension={form.basicPension}
+                livingCost={form.livingCost}
+                setBasicPension={(basicPension) =>
+                  setForm((prev) => ({ ...prev, basicPension }))
+                }
+                setLivingCost={(livingCost) =>
+                  setForm((prev) => ({ ...prev, livingCost }))
+                }
+              />
+            </div>
             {result ? (
               <Report
                 result={result}
@@ -5504,59 +7513,6 @@ export default function Home() {
                 </CardDescription>
               </CardHeader>
               <CardContent className="grid gap-3">
-                <section className="grid gap-2 rounded-xl border-2 border-blue-400 bg-blue-50 p-4 shadow-sm">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <label
-                      htmlFor="profile-password"
-                      className="text-base font-black text-blue-950"
-                    >
-                      저장·불러오기 암호{' '}
-                      <span className="text-red-600">필수</span>
-                    </label>
-                    <Badge
-                      className={
-                        profileFileName ? 'bg-emerald-700' : 'bg-amber-700'
-                      }
-                    >
-                      {profileFileName
-                        ? '현재 탭에 암호 보관됨'
-                        : '파일 작업 전 입력'}
-                    </Badge>
-                  </div>
-                  <div className="relative">
-                    <Input
-                      id="profile-password"
-                      type={showPassword ? 'text' : 'password'}
-                      autoComplete="new-password"
-                      value={password}
-                      className="h-12 border-blue-300 bg-white pr-12 text-base"
-                      placeholder={
-                        profileFileName
-                          ? '현재 연결 파일은 다시 입력하지 않아도 됩니다'
-                          : '8자 이상 암호를 입력하세요'
-                      }
-                      onChange={(event) => setPassword(event.target.value)}
-                    />
-                    <button
-                      type="button"
-                      aria-label={showPassword ? '암호 숨기기' : '암호 보기'}
-                      title={showPassword ? '암호 숨기기' : '암호 보기'}
-                      className="absolute right-2 top-1/2 inline-flex size-8 -translate-y-1/2 items-center justify-center rounded-md text-slate-600 hover:bg-blue-100 hover:text-blue-800"
-                      onClick={() => setShowPassword((visible) => !visible)}
-                    >
-                      {showPassword ? (
-                        <EyeOff className="size-4" />
-                      ) : (
-                        <Eye className="size-4" />
-                      )}
-                    </button>
-                  </div>
-                  <p className="text-xs font-semibold leading-5 text-blue-900">
-                    이 암호 하나를 JSON 파일 저장과 불러오기에 모두 사용합니다.
-                    8자 이상 입력하세요. 암호를 잊으면 파일을 복구할 수
-                    없습니다.
-                  </p>
-                </section>
                 <section className="grid gap-3 rounded-xl border border-blue-200 bg-blue-50 p-4">
                   <div>
                     <h3 className="font-black text-blue-950">로컬 JSON 파일</h3>
@@ -5567,14 +7523,35 @@ export default function Home() {
                     </p>
                   </div>
                   <div className="flex flex-wrap gap-2">
-                    <Button onClick={exportEncryptedProfile}>
-                      {profileFileName ? <Save /> : <Download />}
-                      {profileFileName
-                        ? '현재 파일에 바로 저장 (Ctrl+S)'
-                        : 'JSON 파일 저장'}
+                    <Button
+                      className="bg-blue-700 font-bold hover:bg-blue-800"
+                      onClick={() => {
+                        if (profileFileName && profileFilePassword.current)
+                          void exportEncryptedProfile();
+                        else openNewProfileSaveDialog();
+                      }}
+                    >
+                      {profileFileMode === 'direct' ? <Save /> : <Download />}
+                      {profileFileMode === 'direct'
+                        ? profileFileWriteReady
+                          ? '현재 파일에 바로 저장 (Ctrl+S)'
+                          : '현재 파일 쓰기 권한 확인'
+                        : profileFileMode === 'download'
+                          ? '같은 이름으로 다시 저장 (Ctrl+S)'
+                          : 'JSON 파일 저장'}
                     </Button>
-                    <Button variant="outline" onClick={chooseEncryptedProfile}>
+                    <Button
+                      className="bg-emerald-700 font-bold hover:bg-emerald-800"
+                      onClick={chooseEncryptedProfile}
+                    >
                       <Upload /> JSON 파일 불러오기
+                    </Button>
+                    <Button
+                      className="bg-violet-700 font-bold hover:bg-violet-800"
+                      disabled={!profileFileName}
+                      onClick={openSaveAsProfileDialog}
+                    >
+                      <FilePlus2 /> 현재 파일을 다른 이름으로 저장
                     </Button>
                     <input
                       ref={profileInput}
@@ -5589,9 +7566,13 @@ export default function Home() {
                     평문 개인정보가 아닌 암호문만 기록됩니다.
                   </p>
                   <p className="rounded-lg bg-white/80 px-3 py-2 text-xs font-semibold text-blue-900">
-                    {profileFileName
-                      ? `현재 연결된 파일: ${profileFileName} · 암호는 현재 탭 메모리에만 유지되므로 다시 입력할 필요가 없습니다. Ctrl+S로 즉시 저장할 수 있으며, 탭을 닫거나 새로고침하면 연결과 암호가 해제됩니다.`
-                      : '파일을 한 번 저장하거나 불러오면 현재 탭에서 같은 파일에 바로 저장할 수 있습니다.'}
+                    {profileFileMode === 'direct'
+                      ? profileFileWriteReady
+                        ? `현재 연결된 파일: ${profileFileName} · 암호는 현재 탭 메모리에만 유지됩니다. Ctrl+S로 같은 파일에 즉시 저장하며, 탭을 닫거나 새로고침하면 연결과 암호가 해제됩니다.`
+                        : `현재 기억한 파일: ${profileFileName} · Ctrl+S를 누르면 새 저장 위치를 묻지 않고 이 파일의 쓰기 권한만 확인합니다.`
+                      : profileFileMode === 'download'
+                        ? `현재 작업 파일: ${profileFileName} · 이 브라우저는 원본 파일 직접 덮어쓰기를 지원하지 않습니다. Ctrl+S는 저장 위치를 다시 묻지 않고 같은 파일명으로 암호화 JSON을 내려받습니다.`
+                        : '파일을 한 번 저장하거나 불러오면 지원 브라우저에서는 원본에 바로 저장하고, 그 외 브라우저에서는 같은 이름으로 즉시 다시 내려받습니다.'}
                   </p>
                 </section>
                 <section className="grid gap-3 rounded-xl border border-slate-200 bg-slate-50 p-4">
@@ -5601,6 +7582,31 @@ export default function Home() {
                       탭을 닫기 전 잠깐 보관할 때만 사용하세요.
                     </p>
                   </div>
+                  <label className="grid gap-1.5">
+                    <span className="field-label">임시 저장 암호</span>
+                    <div className="relative">
+                      <Input
+                        type={showPassword ? 'text' : 'password'}
+                        autoComplete="current-password"
+                        value={password}
+                        className="bg-white pr-12"
+                        placeholder="8자 이상 암호"
+                        onChange={(event) => setPassword(event.target.value)}
+                      />
+                      <button
+                        type="button"
+                        aria-label={showPassword ? '암호 숨기기' : '암호 보기'}
+                        className="absolute right-2 top-1/2 inline-flex size-8 -translate-y-1/2 items-center justify-center rounded-md text-slate-600 hover:bg-slate-100"
+                        onClick={() => setShowPassword((visible) => !visible)}
+                      >
+                        {showPassword ? (
+                          <EyeOff className="size-4" />
+                        ) : (
+                          <Eye className="size-4" />
+                        )}
+                      </button>
+                    </div>
+                  </label>
                   <div className="flex flex-wrap gap-2">
                     <Button variant="outline" onClick={saveSession}>
                       <LockKeyhole /> 탭 임시 저장
@@ -5614,6 +7620,11 @@ export default function Home() {
                         try {
                           clearEncryptedSession();
                           setSessionExists(false);
+                          if (lastSaveKind === 'session') {
+                            setLastSaveKind(null);
+                            setLastSavedAt(null);
+                            setHasUnsavedChanges(true);
+                          }
                           setMessage('암호화 세션을 삭제했습니다.');
                         } catch (error) {
                           setMessage((error as Error).message);
@@ -5633,50 +7644,164 @@ export default function Home() {
             </Card>
             <Card>
               <CardHeader>
-                <CardTitle>정책 파일 관리</CardTitle>
+                <CardTitle>연금·부동산 통합 정책 업데이트</CardTitle>
                 <CardDescription>
-                  프로그램을 다시 설치하지 않고 검증된 JSON 정책 파일만 교체할
-                  수 있습니다.
+                  연금·부동산 정책을 AI 업데이트 요청 Markdown으로 내보내고,
+                  돌려받은 파일을 검증·미리보기한 뒤 함께 적용할 수 있습니다.
                 </CardDescription>
               </CardHeader>
               <CardContent className="grid gap-3">
                 <div className="rounded-lg bg-slate-100 p-3 text-sm">
-                  <b>{policy.policyId}</b>
+                  <b>연금: {policy.policyId}</b>
+                  <span className="ml-2 text-slate-500">
+                    시행 기준 {policy.effectiveDate}
+                  </span>
                   <br />
-                  <span className="text-slate-500">
-                    시행 기준 {policy.effectiveDate} · 스키마{' '}
-                    {policy.schemaVersion}
+                  <b>
+                    부동산:{' '}
+                    {
+                      (
+                        form.householdFinance.realEstateCostPolicy ??
+                        DEFAULT_REAL_ESTATE_COST_POLICY
+                      ).policyId
+                    }
+                  </b>
+                  <span className="ml-2 text-slate-500">
+                    시행 기준{' '}
+                    {
+                      (
+                        form.householdFinance.realEstateCostPolicy ??
+                        DEFAULT_REAL_ESTATE_COST_POLICY
+                      ).effectiveDate
+                    }
                   </span>
                 </div>
                 <input
-                  ref={policyInput}
+                  ref={policyMarkdownInput}
                   className="hidden"
                   type="file"
-                  accept="application/json,.json"
-                  onChange={importPolicy}
+                  accept="text/markdown,.md"
+                  onChange={importPolicyUpdateMarkdown}
                 />
-                <div className="flex flex-wrap gap-2">
-                  <Button onClick={() => policyInput.current?.click()}>
-                    <Upload /> 정책 JSON 적용
-                  </Button>
-                  <Button variant="outline" onClick={exportPolicy}>
-                    <Download /> 현재 정책 내려받기
-                  </Button>
+                <section className="rounded-xl border-2 border-blue-300 bg-blue-50 p-4">
+                  <p className="font-black text-blue-950">
+                    AI로 연금·부동산 정책 함께 업데이트
+                  </p>
+                  <ol className="mt-2 list-decimal space-y-1 pl-5 text-xs leading-5 text-blue-900">
+                    <li>업데이트 요청 Markdown을 내려받습니다.</li>
+                    <li>
+                      GPT 등 웹 검색이 가능한 AI에 첨부해 공식자료 기준
+                      업데이트를 요청합니다.
+                    </li>
+                    <li>
+                      AI가 돌려준 Markdown을 불러와 변경 요약·출처를 확인합니다.
+                    </li>
+                    <li>
+                      검토 후 ‘두 정책 적용’을 눌러야 실제 계산에 반영됩니다.
+                    </li>
+                  </ol>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <Button onClick={exportPolicyUpdateMarkdown}>
+                      <Download /> AI 업데이트 요청 MD
+                    </Button>
+                    <Button
+                      variant="outline"
+                      onClick={() => policyMarkdownInput.current?.click()}
+                    >
+                      <Upload /> AI 결과 MD 불러오기
+                    </Button>
+                  </div>
+                  <p className="mt-2 text-xs leading-5 text-blue-800">
+                    Markdown의 일반 문장은 실행하지 않습니다. 고정 표식 안의
+                    JSON 정책 블록만 읽고 스키마·숫자 범위·HTTPS 출처를
+                    검사합니다.
+                  </p>
+                </section>
+                {pendingPolicyUpdate && (
+                  <section className="rounded-xl border-2 border-amber-300 bg-amber-50 p-4 text-sm">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <p className="font-black text-amber-950">
+                          적용 전 미리보기
+                        </p>
+                        <p className="mt-1 text-xs text-amber-800">
+                          연금 {policy.policyId} →{' '}
+                          {pendingPolicyUpdate.pensionPolicy.policyId} · 부동산{' '}
+                          {
+                            (
+                              form.householdFinance.realEstateCostPolicy ??
+                              DEFAULT_REAL_ESTATE_COST_POLICY
+                            ).policyId
+                          }{' '}
+                          → {pendingPolicyUpdate.realEstatePolicy.policyId}
+                        </p>
+                      </div>
+                      <div className="flex gap-2">
+                        <Button onClick={applyPendingPolicyUpdate}>
+                          두 정책 적용
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          onClick={() => setPendingPolicyUpdate(null)}
+                        >
+                          취소
+                        </Button>
+                      </div>
+                    </div>
+                    <p className="mt-3 text-xs font-black text-amber-950">
+                      변경 요약
+                    </p>
+                    <ul className="mt-1 list-disc space-y-1 pl-5 text-xs leading-5">
+                      {pendingPolicyUpdate.changeSummary.map((summary) => (
+                        <li key={summary}>{summary}</li>
+                      ))}
+                    </ul>
+                    <p className="mt-3 text-xs font-black text-amber-950">
+                      확인할 출처 ({pendingPolicyUpdate.researchSources.length}
+                      건)
+                    </p>
+                    <ul className="mt-1 max-h-40 space-y-1 overflow-auto text-xs leading-5">
+                      {pendingPolicyUpdate.researchSources.map((source) => (
+                        <li key={`${source.url}-${source.checkedAt}`}>
+                          <a
+                            className="font-bold text-blue-700 underline"
+                            href={source.url}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            {source.title}
+                          </a>{' '}
+                          · 확인 {source.checkedAt}
+                        </li>
+                      ))}
+                    </ul>
+                  </section>
+                )}
+                <div className="flex items-center justify-between gap-3 border-t pt-3">
+                  <p className="text-xs leading-5 text-amber-700">
+                    AI 결과는 출처·시행일·정책 ID를 확인한 뒤 적용하세요.
+                  </p>
                   <Button
+                    size="sm"
                     variant="ghost"
                     onClick={() => {
                       setPolicy(DEFAULT_POLICY);
-                      setMessage('내장 기본 정책으로 되돌렸습니다.');
+                      setForm((previous) => ({
+                        ...previous,
+                        householdFinance: {
+                          ...previous.householdFinance,
+                          realEstateCostPolicy: DEFAULT_REAL_ESTATE_COST_POLICY,
+                        },
+                      }));
+                      setPendingPolicyUpdate(null);
+                      setMessage(
+                        '연금·부동산 내장 기본 정책으로 되돌렸습니다.',
+                      );
                     }}
                   >
-                    기본 정책 복원
+                    문제 발생 시 기본값 복원
                   </Button>
                 </div>
-                <p className="text-xs leading-5 text-amber-700">
-                  AI가 만든 정책 파일은 바로 신뢰하지 말고 출처 URL·시행일·정책
-                  ID를 확인한 뒤 적용하세요. 형식이 다르면 프로그램이
-                  거부합니다.
-                </p>
               </CardContent>
             </Card>
           </TabsContent>

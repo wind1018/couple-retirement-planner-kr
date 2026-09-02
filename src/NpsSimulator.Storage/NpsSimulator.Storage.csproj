@@ -1,5 +1,0 @@
-<Project Sdk="Microsoft.NET.Sdk">
-  <ItemGroup>
-    <ProjectReference Include="..\NpsSimulator.Simulation\NpsSimulator.Simulation.csproj" />
-  </ItemGroup>
-</Project>
