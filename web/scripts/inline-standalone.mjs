@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const [inputPath, outputPath] = process.argv.slice(2);
 if (!inputPath || !outputPath) throw new Error('usage: inline-standalone INPUT_HTML OUTPUT_HTML');
@@ -17,6 +18,9 @@ html = await replaceAsync(html, /<script type="module"[^>]*src="([^"]+)"[^>]*><\
 });
 
 if (/<(script|link)\b[^>]*(src|href)="\.\/assets\//.test(html)) throw new Error('외부 빌드 자산이 남아 있어 단일 HTML을 만들 수 없습니다.');
+const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
+const license = await fs.readFile(path.resolve(scriptDirectory, '../../LICENSE'), 'utf8');
+html = `<!--\n${license.trim()}\n-->\n${html}`;
 await fs.mkdir(path.dirname(outputPath), { recursive: true });
 await fs.writeFile(outputPath, html, 'utf8');
 
