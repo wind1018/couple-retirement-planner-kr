@@ -1,8 +1,16 @@
 # 노후자금 시뮬레이터
 
-한국 부부의 국민·기초·개인·퇴직·유족연금과 생활비, 자산·부채, 은퇴 이후 현금흐름을 한 화면에서 비교합니다. 최종 배포물은 설치나 웹 서버가 필요 없는 `retirement-fund-simulator.html` 단일 파일입니다.
+한국 부부의 국민·기초·개인·퇴직·유족연금과 생활비, 자산·부채, 은퇴 이후 현금흐름을 한 화면에서 비교합니다.
 
 모든 계산은 브라우저 안에서 수행합니다. 입력값을 서버로 보내지 않으며, 사용자가 선택한 경우에만 암호화 JSON 파일 또는 현재 탭의 `sessionStorage`에 저장합니다.
+
+## 바로 사용하기
+
+1. [`release/retirement-fund-simulator.html`](release/retirement-fund-simulator.html)을 내려받습니다.
+2. 내려받은 파일을 Chrome 또는 Edge로 엽니다.
+3. 자신의 조건을 입력하고 계산합니다.
+
+설치, 회원가입, 웹 서버 실행은 필요하지 않습니다. 다른 사람에게 전달할 때도 이 HTML 파일 하나만 보내면 됩니다. 일반 사용자는 Node.js나 `npm` 명령을 사용할 필요가 없습니다.
 
 ## 주요 기능
 
@@ -19,32 +27,17 @@
 - AES-256-GCM 암호화 JSON 저장·불러오기와 `Ctrl+S` 연결 저장
 - 인쇄 및 PDF용 보고서 레이아웃
 
-## 최종 배포 파일
+## 소스에서 배포 파일 다시 만들기
 
-`release/retirement-fund-simulator.html`만 전달하면 됩니다. 받은 사람은 Chrome 또는 Edge에서 파일을 직접 열어 자신의 조건을 입력하고 계산할 수 있습니다.
-
-## 소스 미리보기
-
-Node.js 22.13 이상이 필요합니다.
+이 절은 프로그램을 수정하거나 새 HTML을 생성하려는 개발자만 사용합니다. 일반 사용에는 필요하지 않습니다. Node.js 22.13 이상에서 다음 명령을 실행합니다.
 
 ```powershell
 cd web
 npm install
-npm run dev
-```
-
-이 명령은 개발 중 화면을 확인하기 위한 Vite 미리보기이며 서버용 배포물을 생성하지 않습니다.
-
-## 검사와 단일 HTML 빌드
-
-```powershell
-cd web
-npm run lint
-npm test
 npm run build
 ```
 
-`npm run build`와 `npm run build:standalone`은 모두 `release/retirement-fund-simulator.html` 한 파일을 생성합니다.
+빌드가 완료되면 `release/retirement-fund-simulator.html`이 새로 생성됩니다. 별도의 웹 서버용 배포판은 만들지 않습니다.
 
 ## 저장과 개인정보 보호
 
