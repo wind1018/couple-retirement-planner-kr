@@ -97,6 +97,10 @@ function fundingLines(analysis: HouseholdCashflowAnalysis) {
     `  - 세후 할인율: 연 ${analysis.discountRate}%`,
     '- 스트레스 값은 기본 필요재원이 아니라 보수적 상한 비교값',
     `- 계획에 따른 전체 자산 인출액: ${money(analysis.finance.plannedAssetWithdrawals)}`,
+    `- 생활비 현금으로 받은 자산 운용수익 합계: ${money(analysis.finance.plannedAssetReturnIncome)}`,
+    `- 자산 운용수익 재투자 합계: ${money(analysis.finance.plannedAssetReinvestedReturns)}`,
+    `- 주택 교체 후 생성된 운용자금: ${money(analysis.finance.housingMoveInvestableSurplus)}`,
+    `- 새 주택 구입 별도 필요자금: ${money(analysis.finance.housingPurchaseFundingShortfall)}`,
     `- 자산 인출 후 남은 부족액 현재가치: ${money(analysis.exactGapPresentValueAfterAssets)}`,
     `- 마지막 분석연도 남은 활용 예정 자산: ${money(analysis.finance.remainingPlannedAssetsAtEnd)}`,
     `- 첫 부족 전 월 적립 추정: ${money(analysis.suggestedMonthlyContribution)}`,
@@ -134,8 +138,16 @@ export function buildAiAnalysisMarkdown({
     ]),
   );
   const timelineRows = cashflow.rows.map(
-    (row) =>
-      `| ${row.year} | ${cell(agePair(row.ageA, row.ageB))} | ${cell(eventByYear.get(row.year) ?? '')} | ${money(row.employmentIncome)} | ${money(row.nationalPension)} | ${money(row.basicPension)} | ${money(row.privatePension)} | ${money(row.rentalIncomeNet)} | ${money(row.otherIncome)} | ${money(row.debtService)} | ${money(row.assetWithdrawal)} | ${money(row.remainingRetirementAssets)} | ${money(row.livingCost)} | ${signedMoney(row.monthlySurplus, row.monthlyGap)} |`,
+    (row) => {
+      const transactions = row.assetTransactionDetails
+        .map((detail) =>
+          detail.purchasedAssetName
+            ? `${detail.soldAssetName} 매각→${detail.purchasedAssetName} 구입, 잔여 ${money(detail.investableSurplus)}`
+            : `${detail.soldAssetName} 매각 ${money(detail.saleProceeds)}`,
+        )
+        .join(', ');
+      return `| ${row.year} | ${cell(agePair(row.ageA, row.ageB))} | ${cell([eventByYear.get(row.year), transactions].filter(Boolean).join(', '))} | ${money(row.employmentIncome)} | ${money(row.nationalPension)} | ${money(row.basicPension)} | ${money(row.privatePension)} | ${money(row.rentalIncomeNet)} | ${money(row.otherIncome)} | ${money(row.debtService)} | ${money(row.assetReturnIncome)} | ${money(row.assetWithdrawal)} | ${money(row.remainingRetirementAssets)} | ${money(row.replacementHousingValue)} | ${money(row.livingCost)} | ${signedMoney(row.monthlySurplus, row.monthlyGap)} |`;
+    },
   );
   const additionalRows = result.additionalPensions.map((account) => {
     const contributionFrequency =
@@ -157,7 +169,11 @@ export function buildAiAnalysisMarkdown({
         : plan.mode === 'fixed_monthly'
           ? `매월 ${money(plan.monthlyAmount ?? 0)} 인출`
           : '보유만 함';
-    return `| ${cell(asset.name)} | ${asset.type} | ${money(asset.currentValue)} | ${asset.retirementLiquidity} | ${asset.salePlan?.enabled ? `${asset.salePlan.year}년` : '없음'} | ${cell(`${planLabel}${plan.mode === 'hold' ? '' : ` · ${plan.startYear}년부터${plan.endYear == null ? '' : ` ${plan.endYear}년까지`} · 최소 ${money(plan.reserveAmount ?? 0)} 보유`}`)} | ${asset.rental?.enabled ? money(asset.rental.grossMonthlyRent) : '없음'} |`;
+    const move = asset.housingMovePlan;
+    const moveLabel = move?.enabled
+      ? `${move.purchaseYear}년 ${move.replacementName} ${money(move.purchasePrice)}에 구입 · 잔여금 ${move.surplusName}(${move.surplusType}, 연 ${move.surplusAnnualReturnRate}%, ${move.surplusReturnMode})`
+      : '없음';
+    return `| ${cell(asset.name)} | ${asset.type} | ${money(asset.currentValue)} | ${asset.retirementLiquidity} | ${asset.salePlan?.enabled ? `${asset.salePlan.year}년` : '없음'} | ${cell(moveLabel)} | ${cell(`${planLabel}${plan.mode === 'hold' ? '' : ` · ${plan.startYear}년부터${plan.endYear == null ? '' : ` ${plan.endYear}년까지`} · 최소 ${money(plan.reserveAmount ?? 0)} 보유`}`)} | ${asset.rental?.enabled ? money(asset.rental.grossMonthlyRent) : '없음'} |`;
   });
   const debtRows = householdFinance.debts.map(
     (debt) =>
@@ -221,8 +237,9 @@ export function buildAiAnalysisMarkdown({
     '1. 본인과 배우자의 은퇴, 국민연금 개시, 개인·퇴직연금 개시 사이에 소득 공백이 언제 발생하는지 연도와 당시 나이로 설명해 주세요.',
     '2. 선택한 생활비 기준보다 가구소득이 부족한 기간, 최대 부족액, 원인을 우선순위로 정리해 주세요.',
     '3. 기존 퇴직·개인연금의 개시 시점 조정, 추가 저축, 지출 조정 중 비교할 현실적인 대안을 제시해 주세요. 특정 금융상품 매수 권유는 하지 마세요.',
-    '4. 물가상승률, 기대수익률, 예상 사망 나이가 달라질 때 취약한 가정을 찾아 민감도 점검 항목을 제안해 주세요.',
-    '5. 결론을 단정하기 전에 누락되었거나 확인이 필요한 정보와 계산 가정을 질문 목록으로 만들어 주세요.',
+    '4. 주택 매각·대체주택 구입·잔여금 운용 계획이 은퇴 현금흐름에 미치는 영향과 거래비용·가격·수익률 위험을 점검해 주세요.',
+    '5. 물가상승률, 기대수익률, 예상 사망 나이가 달라질 때 취약한 가정을 찾아 민감도 점검 항목을 제안해 주세요.',
+    '6. 결론을 단정하기 전에 누락되었거나 확인이 필요한 정보와 계산 가정을 질문 목록으로 만들어 주세요.',
     '',
     '## 1. 가구 구성과 근로소득',
     '',
@@ -264,8 +281,8 @@ export function buildAiAnalysisMarkdown({
     '',
     ...(assetRows.length
       ? [
-          '| 이름 | 유형 | 현재가치 | 은퇴 유동성 | 매각계획 | 생활비 사용계획 | 월 임대료 |',
-          '|---|---|---:|---|---|---|---:|',
+          '| 이름 | 유형 | 현재가치 | 은퇴 유동성 | 매각계획 | 주거 이전·잔여금 운용 | 생활비 사용계획 | 월 임대료 |',
+          '|---|---|---:|---|---|---|---|---:|',
           ...assetRows,
         ]
       : ['등록된 자산 없음']),
@@ -285,6 +302,11 @@ export function buildAiAnalysisMarkdown({
     `- 순자산: ${money(cashflow.finance.netWorth)}`,
     `- 은퇴 활용 가능 자산: ${money(cashflow.finance.retirementAvailableAssets)}`,
     `- 계획 기간 총 자산 인출액: ${money(cashflow.finance.plannedAssetWithdrawals)}`,
+    `- 생활비 현금으로 받은 자산 운용수익 합계: ${money(cashflow.finance.plannedAssetReturnIncome)}`,
+    `- 자산 운용수익 재투자 합계: ${money(cashflow.finance.plannedAssetReinvestedReturns)}`,
+    `- 주택 교체 후 생성된 운용자금: ${money(cashflow.finance.housingMoveInvestableSurplus)}`,
+    `- 새 주택 구입 별도 필요자금: ${money(cashflow.finance.housingPurchaseFundingShortfall)}`,
+    `- 마지막 분석연도 새 거주주택 가치: ${money(cashflow.finance.replacementHousingValueAtEnd)}`,
     `- 마지막 분석연도 남은 활용 예정 자산: ${money(cashflow.finance.remainingPlannedAssetsAtEnd)}`,
     `- 실거주 주택 가치: ${money(cashflow.finance.primaryHomeValue)} (매각 계획이 없으면 은퇴재원에서 제외)`,
     '',
@@ -297,8 +319,8 @@ export function buildAiAnalysisMarkdown({
     '',
     '## 6. 연도별 가구 현금흐름',
     '',
-    '| 연도 | 당시 나이 | 주요 사건 | 근로 | 국민연금 | 기초연금 | 사적연금 | 임대순소득 | 기타 | 대출상환 | 자산인출 | 남은 활용자산 | 생활비 | 순차이 |',
-    '|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|',
+    '| 연도 | 당시 나이 | 주요 사건 | 근로 | 국민연금 | 기초연금 | 사적연금 | 임대순소득 | 기타 | 대출상환 | 현금 운용수익 | 자산인출 | 남은 활용자산 | 새 주택 가치 | 생활비 | 순차이 |',
+    '|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|',
     ...timelineRows,
     '',
     '## 7. 부족구간',

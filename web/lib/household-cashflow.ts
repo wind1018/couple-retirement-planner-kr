@@ -26,6 +26,22 @@ export type AssetUsePlan = {
   monthlyAmount?: number;
   reserveAmount?: number;
 };
+export type HousingSurplusType = 'deposit' | 'investment';
+export type HousingSurplusReturnMode = 'reinvest' | 'cash_income';
+export type HousingMovePlan = {
+  enabled: boolean;
+  purchaseYear: number;
+  replacementName: string;
+  purchasePrice: number;
+  purchaseCostRate?: number;
+  purchaseTaxEstimate?: number;
+  replacementAnnualAppreciationRate?: number;
+  interimAnnualReturnRate?: number;
+  surplusName: string;
+  surplusType: HousingSurplusType;
+  surplusAnnualReturnRate: number;
+  surplusReturnMode: HousingSurplusReturnMode;
+};
 export type DebtRepaymentType =
   | 'interest_only'
   | 'amortizing'
@@ -46,6 +62,7 @@ export type HouseholdAsset = {
   retirementLiquidity: RetirementLiquidity;
   annualAppreciationRate?: number;
   retirementUse?: AssetUsePlan;
+  housingMovePlan?: HousingMovePlan;
   salePlan?: {
     enabled: boolean;
     year: number;
@@ -118,8 +135,26 @@ export type HouseholdCashflowRow = {
   monthlyGapBeforeAsset: number;
   assetWithdrawal: number;
   assetWithdrawalDetails: { assetId: string; name: string; amount: number }[];
+  assetReturnIncome: number;
+  assetReturnIncomeDetails: {
+    assetId: string;
+    name: string;
+    amount: number;
+  }[];
+  assetReinvestedReturn: number;
+  assetTransactionDetails: {
+    assetId: string;
+    transactionKind: 'sale' | 'purchase' | 'sale_and_purchase';
+    soldAssetName: string;
+    saleProceeds: number;
+    purchasedAssetName?: string;
+    purchaseCost?: number;
+    investableSurplus: number;
+    fundingShortfall: number;
+  }[];
   householdCashAvailableAfterAsset: number;
   remainingRetirementAssets: number;
+  replacementHousingValue: number;
   livingCost: number;
   monthlyGap: number;
   monthlySurplus: number;
@@ -140,7 +175,12 @@ export type HouseholdFinanceSummary = {
   netWorth: number;
   retirementAvailableAssets: number;
   plannedAssetWithdrawals: number;
+  plannedAssetReturnIncome: number;
+  plannedAssetReinvestedReturns: number;
+  housingMoveInvestableSurplus: number;
+  housingPurchaseFundingShortfall: number;
   remainingPlannedAssetsAtEnd: number;
+  replacementHousingValueAtEnd: number;
   primaryHomeValue: number;
   monthlyRentalIncomeGrossAtBaseYear: number;
   monthlyRentalIncomeNetAtBaseYear: number;
@@ -375,11 +415,23 @@ function availableAssetValue(asset: HouseholdAsset, currentYear: number) {
     return Math.max(0, asset.currentValue - reserve);
   if (asset.salePlan?.enabled) {
     const sellingCost = clampRate(asset.salePlan?.sellingCostRate);
-    return Math.max(
+    const netSaleValue = Math.max(
       0,
       asset.currentValue * (1 - sellingCost) -
-        (asset.salePlan?.capitalGainsTaxEstimate ?? 0) -
-        reserve,
+        (asset.salePlan?.capitalGainsTaxEstimate ?? 0),
+    );
+    const move = asset.housingMovePlan;
+    if (move?.enabled) {
+      const replacementCost = Math.max(
+        0,
+        move.purchasePrice * (1 + clampRate(move.purchaseCostRate)) +
+          (move.purchaseTaxEstimate ?? 0),
+      );
+      return Math.max(0, netSaleValue - replacementCost - reserve);
+    }
+    return Math.max(
+      0,
+      netSaleValue - reserve,
     );
   }
   return 0;
@@ -414,15 +466,53 @@ function applyAssetUsePlans(
     plan: resolveAssetUsePlan(asset, currentYear),
     balance: Math.max(0, asset.currentValue),
     sold: false,
+    purchased: false,
+    replacementHomeBalance: 0,
   }));
   let totalWithdrawals = 0;
+  let totalReturnIncome = 0;
+  let totalReinvestedReturns = 0;
+  let totalHousingMoveSurplus = 0;
+  let totalHousingPurchaseShortfall = 0;
   const rows = baseRows.map((baseRow, rowIndex): HouseholdCashflowRow => {
     const year = baseRow.year;
+    let annualReturnIncome = 0;
+    let annualReinvestedReturn = 0;
+    const returnIncomeDetails: HouseholdCashflowRow['assetReturnIncomeDetails'] =
+      [];
+    const transactionDetails: HouseholdCashflowRow['assetTransactionDetails'] =
+      [];
     if (rowIndex > 0) {
-      for (const state of states)
-        if (!state.sold)
+      for (const state of states) {
+        const move = state.asset.housingMovePlan;
+        if (!state.sold) {
           state.balance *=
             1 + signedAnnualRate(state.asset.annualAppreciationRate);
+          continue;
+        }
+        if (move?.enabled && !state.purchased) {
+          state.balance *= 1 + signedAnnualRate(move.interimAnnualReturnRate);
+          continue;
+        }
+        if (move?.enabled && state.purchased) {
+          state.replacementHomeBalance *=
+            1 + signedAnnualRate(move.replacementAnnualAppreciationRate);
+          const earned =
+            state.balance * signedAnnualRate(move.surplusAnnualReturnRate);
+          if (move.surplusReturnMode === 'cash_income') {
+            annualReturnIncome += earned;
+            if (earned !== 0)
+              returnIncomeDetails.push({
+                assetId: state.asset.id,
+                name: move.surplusName,
+                amount: round(earned / 12),
+              });
+          } else {
+            state.balance = Math.max(0, state.balance + earned);
+            annualReinvestedReturn += earned;
+          }
+        }
+      }
     }
     for (const state of states) {
       const sale = state.asset.salePlan;
@@ -433,7 +523,68 @@ function applyAssetUsePlans(
             (sale.capitalGainsTaxEstimate ?? 0),
         );
         state.sold = true;
+        const move = state.asset.housingMovePlan;
+        const effectivePurchaseYear = Math.max(
+          sale.year,
+          move?.purchaseYear ?? sale.year,
+        );
+        if (!move?.enabled || effectivePurchaseYear > year)
+          transactionDetails.push({
+            assetId: state.asset.id,
+            transactionKind: 'sale',
+            soldAssetName: state.asset.name,
+            saleProceeds: round(state.balance),
+            investableSurplus: move?.enabled ? 0 : round(state.balance),
+            fundingShortfall: 0,
+          });
       }
+    }
+
+    for (const state of states) {
+      const sale = state.asset.salePlan;
+      const move = state.asset.housingMovePlan;
+      if (!sale?.enabled || !move?.enabled || state.purchased || !state.sold)
+        continue;
+      const effectivePurchaseYear = Math.max(sale.year, move.purchaseYear);
+      if (year < effectivePurchaseYear) continue;
+      const availableBeforePurchase = state.balance;
+      const purchaseCost = Math.max(
+        0,
+        move.purchasePrice * (1 + clampRate(move.purchaseCostRate)) +
+          (move.purchaseTaxEstimate ?? 0),
+      );
+      const investableSurplus = Math.max(
+        0,
+        availableBeforePurchase - purchaseCost,
+      );
+      const fundingShortfall = Math.max(
+        0,
+        purchaseCost - availableBeforePurchase,
+      );
+      state.balance = investableSurplus;
+      state.replacementHomeBalance = Math.max(0, move.purchasePrice);
+      state.purchased = true;
+      totalHousingMoveSurplus += investableSurplus;
+      totalHousingPurchaseShortfall += fundingShortfall;
+      const saleAndPurchaseSameYear = sale.year === effectivePurchaseYear;
+      if (saleAndPurchaseSameYear) {
+        const saleDetailIndex = transactionDetails.findIndex(
+          (detail) => detail.assetId === state.asset.id,
+        );
+        if (saleDetailIndex >= 0) transactionDetails.splice(saleDetailIndex, 1);
+      }
+      transactionDetails.push({
+        assetId: state.asset.id,
+        transactionKind: saleAndPurchaseSameYear
+          ? 'sale_and_purchase'
+          : 'purchase',
+        soldAssetName: state.asset.name,
+        saleProceeds: round(availableBeforePurchase),
+        purchasedAssetName: move.replacementName,
+        purchaseCost: round(purchaseCost),
+        investableSurplus: round(investableSurplus),
+        fundingShortfall: round(fundingShortfall),
+      });
     }
 
     let annualWithdrawal = 0;
@@ -447,7 +598,10 @@ function applyAssetUsePlans(
       annualWithdrawal += amount;
       details.push({
         assetId: state.asset.id,
-        name: state.asset.name,
+        name:
+          state.asset.housingMovePlan?.enabled && state.purchased
+            ? state.asset.housingMovePlan.surplusName
+            : state.asset.name,
         amount: round(amount / 12),
       });
     };
@@ -460,14 +614,17 @@ function applyAssetUsePlans(
         (plan.endYear != null && year > plan.endYear)
       )
         continue;
-      const convertedToCash =
-        asset.retirementLiquidity === 'liquid' || state.sold;
+      const convertedToCash = asset.housingMovePlan?.enabled
+        ? state.purchased
+        : asset.retirementLiquidity === 'liquid' || state.sold;
       if (!convertedToCash) continue;
       if (plan.mode === 'fixed_monthly')
         drawFrom(state, Math.max(0, plan.monthlyAmount ?? 0) * 12);
       if (plan.mode === 'cover_gap') {
         const cashIncludingPriorDraws =
-          baseRow.householdCashIncomeAfterDebt + annualWithdrawal / 12;
+          baseRow.householdCashIncomeAfterDebt +
+          annualReturnIncome / 12 +
+          annualWithdrawal / 12;
         const remainingMonthlyGap = Math.max(
           0,
           baseRow.livingCost - cashIncludingPriorDraws,
@@ -477,20 +634,41 @@ function applyAssetUsePlans(
     }
 
     const assetWithdrawal = round(annualWithdrawal / 12);
+    const assetReturnIncome = round(annualReturnIncome / 12);
+    const assetReinvestedReturn = round(annualReinvestedReturn / 12);
     totalWithdrawals += annualWithdrawal;
+    totalReturnIncome += annualReturnIncome;
+    totalReinvestedReturns += annualReinvestedReturn;
     const householdCashAvailableAfterAsset =
-      baseRow.householdCashIncomeAfterDebt + assetWithdrawal;
+      baseRow.householdCashIncomeAfterDebt +
+      assetReturnIncome +
+      assetWithdrawal;
     const remainingRetirementAssets = round(
       states
-        .filter((state) => state.plan.mode !== 'hold')
+        .filter(
+          (state) =>
+            state.plan.mode !== 'hold' &&
+            (!state.asset.housingMovePlan?.enabled || state.purchased),
+        )
         .reduce((sum, state) => sum + state.balance, 0),
+    );
+    const replacementHousingValue = round(
+      states.reduce(
+        (sum, state) => sum + state.replacementHomeBalance,
+        0,
+      ),
     );
     return {
       ...baseRow,
       assetWithdrawal,
       assetWithdrawalDetails: details,
+      assetReturnIncome,
+      assetReturnIncomeDetails: returnIncomeDetails,
+      assetReinvestedReturn,
+      assetTransactionDetails: transactionDetails,
       householdCashAvailableAfterAsset: round(householdCashAvailableAfterAsset),
       remainingRetirementAssets,
+      replacementHousingValue,
       monthlyGap: round(
         Math.max(0, baseRow.livingCost - householdCashAvailableAfterAsset),
       ),
@@ -502,7 +680,12 @@ function applyAssetUsePlans(
   return {
     rows,
     totalWithdrawals: round(totalWithdrawals),
+    totalReturnIncome: round(totalReturnIncome),
+    totalReinvestedReturns: round(totalReinvestedReturns),
+    housingMoveSurplus: round(totalHousingMoveSurplus),
+    housingPurchaseShortfall: round(totalHousingPurchaseShortfall),
     remainingAssets: rows.at(-1)?.remainingRetirementAssets ?? 0,
+    replacementHousingValue: rows.at(-1)?.replacementHousingValue ?? 0,
   };
 }
 
@@ -646,8 +829,13 @@ export function buildHouseholdCashflow({
         ),
         assetWithdrawal: 0,
         assetWithdrawalDetails: [],
+        assetReturnIncome: 0,
+        assetReturnIncomeDetails: [],
+        assetReinvestedReturn: 0,
+        assetTransactionDetails: [],
         householdCashAvailableAfterAsset: round(householdCashIncomeAfterDebt),
         remainingRetirementAssets: 0,
+        replacementHousingValue: 0,
         livingCost: livingCostAmount,
         monthlyGap: round(
           Math.max(0, livingCostAmount - householdCashIncomeAfterDebt),
@@ -739,7 +927,12 @@ export function buildHouseholdCashflow({
     netWorth: round(grossAssets - liabilities),
     retirementAvailableAssets,
     plannedAssetWithdrawals: assetUse.totalWithdrawals,
+    plannedAssetReturnIncome: assetUse.totalReturnIncome,
+    plannedAssetReinvestedReturns: assetUse.totalReinvestedReturns,
+    housingMoveInvestableSurplus: assetUse.housingMoveSurplus,
+    housingPurchaseFundingShortfall: assetUse.housingPurchaseShortfall,
     remainingPlannedAssetsAtEnd: assetUse.remainingAssets,
+    replacementHousingValueAtEnd: assetUse.replacementHousingValue,
     primaryHomeValue: round(
       finance.assets
         .filter((asset) => asset.type === 'primary_home')
@@ -808,6 +1001,26 @@ export function buildHouseholdCashflow({
       severity: 'warning',
       message: `${unavailablePlannedAssets.map((asset) => asset.name).join(', ')}은(는) 생활비에 사용하도록 설정됐지만 현금성 자산도 아니고 매각 계획도 없어 연도별 인출액에 반영되지 않았습니다.`,
       affectedMetric: 'assetWithdrawal',
+    });
+  const invalidHousingMoveYears = finance.assets.filter(
+    (asset) =>
+      asset.housingMovePlan?.enabled &&
+      asset.salePlan?.enabled &&
+      asset.housingMovePlan.purchaseYear < asset.salePlan.year,
+  );
+  if (invalidHousingMoveYears.length)
+    warnings.push({
+      code: 'HOUSING_PURCHASE_BEFORE_SALE',
+      severity: 'warning',
+      message: `${invalidHousingMoveYears.map((asset) => asset.name).join(', ')}의 새 주택 구입연도가 매각연도보다 빨라 계산에서는 매각연도에 구입하는 것으로 조정했습니다. 먼저 구입할 계획이라면 별도 조달자금이나 대출을 등록해야 합니다.`,
+      affectedMetric: 'assetTransactionDetails',
+    });
+  if (assetUse.housingPurchaseShortfall > 0)
+    warnings.push({
+      code: 'HOUSING_PURCHASE_FUNDING_SHORTFALL',
+      severity: 'critical',
+      message: `주택 매각대금보다 새 주택 구입비용이 커 총 ${round(assetUse.housingPurchaseShortfall).toLocaleString('ko-KR')}원의 별도 구입자금이 필요합니다. 이 금액은 월 생활비 부족액과 분리된 일시 필요재원입니다.`,
+      affectedMetric: 'assetTransactionDetails',
     });
   return {
     baseYear: currentYear,

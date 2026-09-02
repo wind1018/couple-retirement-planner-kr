@@ -8,6 +8,8 @@ export type IncomeEventKind =
   | 'basicPensionStart'
   | 'additionalPensionStart'
   | 'additionalPensionEnd'
+  | 'housingSale'
+  | 'housingPurchase'
   | 'survivorTransition';
 
 export type IncomeTimelineEvent = {

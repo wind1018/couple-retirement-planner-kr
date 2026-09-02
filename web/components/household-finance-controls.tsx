@@ -24,6 +24,8 @@ import type {
   HouseholdAsset,
   HouseholdDebt,
   HouseholdFinanceSettings,
+  HousingSurplusReturnMode,
+  HousingSurplusType,
   RecurringIncome,
   RetirementLiquidity,
 } from '@/lib/household-cashflow';
@@ -50,6 +52,17 @@ const assetUseModeLabels: Record<AssetUseMode, string> = {
   cover_gap: '생활비 부족분 자동 충당',
   fixed_monthly: '매월 정액 인출',
   hold: '보유만 함 · 현금흐름 미사용',
+};
+const housingSurplusTypeLabels: Record<HousingSurplusType, string> = {
+  deposit: '예금·현금성 운용',
+  investment: '투자자산 운용',
+};
+const housingSurplusReturnModeLabels: Record<
+  HousingSurplusReturnMode,
+  string
+> = {
+  reinvest: '수익 재투자 · 잔액 복리 증가',
+  cash_income: '수익을 생활비 현금으로 사용',
 };
 
 function MoneyField({
@@ -231,7 +244,23 @@ export function HouseholdFinanceControls({
           {value.assets.map((asset) => {
             const rentalEnabled = Boolean(asset.rental?.enabled);
             const saleEnabled = Boolean(asset.salePlan?.enabled);
+            const housingMoveEnabled = Boolean(asset.housingMovePlan?.enabled);
             const usePlan = resolveAssetUsePlan(asset, currentYear);
+            const currentNetSaleEstimate = Math.max(
+              0,
+              asset.currentValue *
+                (1 - (asset.salePlan?.sellingCostRate ?? 0) / 100) -
+                (asset.salePlan?.capitalGainsTaxEstimate ?? 0),
+            );
+            const replacementPurchaseEstimate = asset.housingMovePlan?.enabled
+              ? Math.max(
+                  0,
+                  asset.housingMovePlan.purchasePrice *
+                    (1 +
+                      (asset.housingMovePlan.purchaseCostRate ?? 0) / 100) +
+                    (asset.housingMovePlan.purchaseTaxEstimate ?? 0),
+                )
+              : 0;
             return (
               <section
                 key={asset.id}
@@ -299,8 +328,10 @@ export function HouseholdFinanceControls({
                 </div>
                 <div className="mt-4 rounded-lg border border-blue-200 bg-blue-50/70 p-3">
                   <p className="mb-3 text-xs font-bold text-blue-900">
-                    이 자산을 은퇴 생활비에 어떻게 사용할지 정하세요. 자동 충당은
-                    생활비가 부족한 연도에만 필요한 만큼 인출합니다.
+                    {housingMoveEnabled
+                      ? '아래 방식은 새 주택 구입 후 남은 예금·투자자금에 적용됩니다.'
+                      : '이 자산을 은퇴 생활비에 어떻게 사용할지 정하세요.'}{' '}
+                    자동 충당은 생활비가 부족한 연도에만 필요한 만큼 인출합니다.
                   </p>
                   <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
                     <Field label="생활비 활용 방식">
@@ -429,6 +460,11 @@ export function HouseholdFinanceControls({
                             capitalGainsTaxEstimate:
                               asset.salePlan?.capitalGainsTaxEstimate ?? 0,
                           },
+                          housingMovePlan: checked
+                            ? asset.housingMovePlan
+                            : asset.housingMovePlan
+                              ? { ...asset.housingMovePlan, enabled: false }
+                              : undefined,
                           retirementUse: checked
                             ? {
                                 ...usePlan,
@@ -437,7 +473,9 @@ export function HouseholdFinanceControls({
                                     ? 'cover_gap'
                                     : usePlan.mode,
                                 startYear:
-                                  asset.salePlan?.year ?? currentYear + 10,
+                                  asset.housingMovePlan?.enabled
+                                    ? asset.housingMovePlan.purchaseYear
+                                    : (asset.salePlan?.year ?? currentYear + 10),
                               }
                             : asset.retirementLiquidity === 'liquid'
                               ? usePlan
@@ -515,7 +553,12 @@ export function HouseholdFinanceControls({
                               ...asset.salePlan!,
                               year,
                             },
-                            retirementUse: { ...usePlan, startYear: year },
+                            retirementUse: {
+                              ...usePlan,
+                              startYear: asset.housingMovePlan?.enabled
+                                ? asset.housingMovePlan.purchaseYear
+                                : year,
+                            },
                           });
                         }}
                       />
@@ -546,6 +589,280 @@ export function HouseholdFinanceControls({
                         }
                       />
                     </Field>
+                  </div>
+                )}
+                {saleEnabled && asset.salePlan && (
+                  <div className="mt-4 rounded-lg border border-violet-200 bg-violet-50/70 p-3">
+                    <label className="flex items-center gap-2 text-sm font-bold text-violet-950">
+                      <Checkbox
+                        checked={housingMoveEnabled}
+                        onCheckedChange={(checked) => {
+                          const purchaseYear =
+                            asset.housingMovePlan?.purchaseYear ??
+                            asset.salePlan!.year;
+                          patchAsset(asset.id, {
+                            housingMovePlan: {
+                              enabled: Boolean(checked),
+                              purchaseYear,
+                              replacementName:
+                                asset.housingMovePlan?.replacementName ??
+                                '새 거주주택',
+                              purchasePrice:
+                                asset.housingMovePlan?.purchasePrice ?? 0,
+                              purchaseCostRate:
+                                asset.housingMovePlan?.purchaseCostRate ?? 0,
+                              purchaseTaxEstimate:
+                                asset.housingMovePlan?.purchaseTaxEstimate ?? 0,
+                              replacementAnnualAppreciationRate:
+                                asset.housingMovePlan
+                                  ?.replacementAnnualAppreciationRate ?? 0,
+                              interimAnnualReturnRate:
+                                asset.housingMovePlan?.interimAnnualReturnRate ??
+                                0,
+                              surplusName:
+                                asset.housingMovePlan?.surplusName ??
+                                '주택 교체 후 잔여자금',
+                              surplusType:
+                                asset.housingMovePlan?.surplusType ?? 'deposit',
+                              surplusAnnualReturnRate:
+                                asset.housingMovePlan
+                                  ?.surplusAnnualReturnRate ?? 3,
+                              surplusReturnMode:
+                                asset.housingMovePlan?.surplusReturnMode ??
+                                'reinvest',
+                            },
+                            retirementUse: checked
+                              ? {
+                                  ...usePlan,
+                                  mode:
+                                    usePlan.mode === 'hold'
+                                      ? 'cover_gap'
+                                      : usePlan.mode,
+                                  startYear: purchaseYear,
+                                }
+                              : usePlan,
+                          });
+                        }}
+                      />
+                      매각 후 다른 주택을 구입하는 주거 이전 계획
+                    </label>
+                    <p className="mt-1 text-xs leading-5 text-violet-800">
+                      기존 주택 매각대금에서 새 주택 가격·취득비용을 차감하고 남는
+                      금액을 예금 또는 투자자산으로 자동 전환합니다.
+                    </p>
+                    {housingMoveEnabled && asset.housingMovePlan && (
+                      <>
+                        <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                          <Field label="새 주택 구입연도">
+                            <Input
+                              inputMode="numeric"
+                              value={asset.housingMovePlan.purchaseYear}
+                              onChange={(event) => {
+                                const purchaseYear = moneyNumber(
+                                  event.target.value,
+                                );
+                                patchAsset(asset.id, {
+                                  housingMovePlan: {
+                                    ...asset.housingMovePlan!,
+                                    purchaseYear,
+                                  },
+                                  retirementUse: {
+                                    ...usePlan,
+                                    startYear: purchaseYear,
+                                  },
+                                });
+                              }}
+                            />
+                          </Field>
+                          <Field label="새 주택 표시 이름">
+                            <Input
+                              value={asset.housingMovePlan.replacementName}
+                              onChange={(event) =>
+                                patchAsset(asset.id, {
+                                  housingMovePlan: {
+                                    ...asset.housingMovePlan!,
+                                    replacementName: event.target.value,
+                                  },
+                                })
+                              }
+                            />
+                          </Field>
+                          <Field label="구입연도 예상 가격">
+                            <MoneyField
+                              value={asset.housingMovePlan.purchasePrice}
+                              onChange={(purchasePrice) =>
+                                patchAsset(asset.id, {
+                                  housingMovePlan: {
+                                    ...asset.housingMovePlan!,
+                                    purchasePrice,
+                                  },
+                                })
+                              }
+                            />
+                          </Field>
+                          <Field label="취득 부대비용률(%)">
+                            <DecimalField
+                              value={asset.housingMovePlan.purchaseCostRate}
+                              onChange={(purchaseCostRate) =>
+                                patchAsset(asset.id, {
+                                  housingMovePlan: {
+                                    ...asset.housingMovePlan!,
+                                    purchaseCostRate: purchaseCostRate ?? 0,
+                                  },
+                                })
+                              }
+                            />
+                          </Field>
+                          <Field label="취득세·기타 고정비용">
+                            <MoneyField
+                              value={
+                                asset.housingMovePlan.purchaseTaxEstimate ?? 0
+                              }
+                              onChange={(purchaseTaxEstimate) =>
+                                patchAsset(asset.id, {
+                                  housingMovePlan: {
+                                    ...asset.housingMovePlan!,
+                                    purchaseTaxEstimate,
+                                  },
+                                })
+                              }
+                            />
+                          </Field>
+                          <Field label="새 주택 연 가치변동률(%)">
+                            <DecimalField
+                              value={
+                                asset.housingMovePlan
+                                  .replacementAnnualAppreciationRate
+                              }
+                              onChange={(replacementAnnualAppreciationRate) =>
+                                patchAsset(asset.id, {
+                                  housingMovePlan: {
+                                    ...asset.housingMovePlan!,
+                                    replacementAnnualAppreciationRate:
+                                      replacementAnnualAppreciationRate ?? 0,
+                                  },
+                                })
+                              }
+                            />
+                          </Field>
+                          <Field label="매각~구입 대기자금 연수익률(%)">
+                            <DecimalField
+                              value={
+                                asset.housingMovePlan.interimAnnualReturnRate
+                              }
+                              onChange={(interimAnnualReturnRate) =>
+                                patchAsset(asset.id, {
+                                  housingMovePlan: {
+                                    ...asset.housingMovePlan!,
+                                    interimAnnualReturnRate:
+                                      interimAnnualReturnRate ?? 0,
+                                  },
+                                })
+                              }
+                            />
+                          </Field>
+                        </div>
+                        <div className="mt-3 rounded-lg border border-violet-100 bg-white p-3">
+                          <p className="mb-3 text-xs font-black text-violet-950">
+                            새 주택 구입 후 남는 현금 운용
+                          </p>
+                          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                            <Field label="잔여자금 표시 이름">
+                              <Input
+                                value={asset.housingMovePlan.surplusName}
+                                onChange={(event) =>
+                                  patchAsset(asset.id, {
+                                    housingMovePlan: {
+                                      ...asset.housingMovePlan!,
+                                      surplusName: event.target.value,
+                                    },
+                                  })
+                                }
+                              />
+                            </Field>
+                            <Field label="운용 유형">
+                              <NativeSelect
+                                value={asset.housingMovePlan.surplusType}
+                                onChange={(event) =>
+                                  patchAsset(asset.id, {
+                                    housingMovePlan: {
+                                      ...asset.housingMovePlan!,
+                                      surplusType: event.target
+                                        .value as HousingSurplusType,
+                                    },
+                                  })
+                                }
+                              >
+                                {Object.entries(housingSurplusTypeLabels).map(
+                                  ([key, label]) => (
+                                    <NativeSelectOption key={key} value={key}>
+                                      {label}
+                                    </NativeSelectOption>
+                                  ),
+                                )}
+                              </NativeSelect>
+                            </Field>
+                            <Field label="예상 연수익률(%)">
+                              <DecimalField
+                                value={
+                                  asset.housingMovePlan.surplusAnnualReturnRate
+                                }
+                                onChange={(surplusAnnualReturnRate) =>
+                                  patchAsset(asset.id, {
+                                    housingMovePlan: {
+                                      ...asset.housingMovePlan!,
+                                      surplusAnnualReturnRate:
+                                        surplusAnnualReturnRate ?? 0,
+                                    },
+                                  })
+                                }
+                              />
+                            </Field>
+                            <Field label="수익 처리 방식">
+                              <NativeSelect
+                                value={
+                                  asset.housingMovePlan.surplusReturnMode
+                                }
+                                onChange={(event) =>
+                                  patchAsset(asset.id, {
+                                    housingMovePlan: {
+                                      ...asset.housingMovePlan!,
+                                      surplusReturnMode: event.target
+                                        .value as HousingSurplusReturnMode,
+                                    },
+                                  })
+                                }
+                              >
+                                {Object.entries(
+                                  housingSurplusReturnModeLabels,
+                                ).map(([key, label]) => (
+                                  <NativeSelectOption key={key} value={key}>
+                                    {label}
+                                  </NativeSelectOption>
+                                ))}
+                              </NativeSelect>
+                            </Field>
+                          </div>
+                          <p className="mt-2 text-xs leading-5 text-slate-600">
+                            생활비 인출 방식·시작연도·최소잔액은 위의 ‘생활비 활용
+                            방식’ 설정을 따릅니다.
+                          </p>
+                        </div>
+                        <div className="mt-3 rounded-lg border border-violet-200 bg-white px-3 py-2 text-sm font-bold text-violet-950">
+                          현재 입력금액 단순 비교: 매각 순액{' '}
+                          {currentNetSaleEstimate.toLocaleString('ko-KR')}원 - 새 주택
+                          구입 총액{' '}
+                          {replacementPurchaseEstimate.toLocaleString('ko-KR')}원 ={' '}
+                          {currentNetSaleEstimate >= replacementPurchaseEstimate
+                            ? `예상 현금 차액 ${(currentNetSaleEstimate - replacementPurchaseEstimate).toLocaleString('ko-KR')}원`
+                            : `별도 조달 필요 ${(replacementPurchaseEstimate - currentNetSaleEstimate).toLocaleString('ko-KR')}원`}
+                          <small className="mt-1 block font-normal leading-5 text-slate-500">
+                            실제 결과는 매각연도까지의 가치변동과 매각~구입 사이
+                            대기자금 수익을 다시 반영합니다.
+                          </small>
+                        </div>
+                      </>
+                    )}
                   </div>
                 )}
                 <div className="mt-3 flex justify-end">

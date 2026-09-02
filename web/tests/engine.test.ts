@@ -896,6 +896,96 @@ void test('부동산은 매각연도 전에는 인출하지 않고 매각 뒤 �
   );
 });
 
+void test('주택 매각 후 새 주택 구입 차액을 운용자산과 현금수익으로 연결', () => {
+  const result = simulate(
+    person({
+      birth: '19660101',
+      hasNps: false,
+      retirementAge: 60,
+      employmentIncomeEnabled: false,
+      preRetirementMonthlyIncome: 0,
+      deathAge: 70,
+    }),
+    person({ enabled: false, name: '배우자' }),
+    DEFAULT_POLICY,
+  );
+  const analysis = buildHouseholdCashflow({
+    result,
+    livingCost: {
+      reference: 'custom',
+      householdSize: 1,
+      basis: 'median',
+      customBaseYear: 2026,
+      customMonthlyAmount: 1_000_000,
+      annualInflationRate: 0,
+      survivorMode: 'same_as_couple',
+    },
+    finance: {
+      assets: [
+        {
+          id: 'home-move',
+          name: 'A 아파트',
+          type: 'primary_home',
+          currentValue: 2_500_000_000,
+          retirementLiquidity: 'sellable',
+          annualAppreciationRate: 0,
+          salePlan: {
+            enabled: true,
+            year: 2030,
+            sellingCostRate: 0,
+            capitalGainsTaxEstimate: 0,
+          },
+          housingMovePlan: {
+            enabled: true,
+            purchaseYear: 2032,
+            replacementName: 'B 아파트',
+            purchasePrice: 1_500_000_000,
+            purchaseCostRate: 0,
+            purchaseTaxEstimate: 0,
+            replacementAnnualAppreciationRate: 0,
+            interimAnnualReturnRate: 2,
+            surplusName: '주택 차액 예금',
+            surplusType: 'deposit',
+            surplusAnnualReturnRate: 3,
+            surplusReturnMode: 'cash_income',
+          },
+          retirementUse: {
+            mode: 'hold',
+            startYear: 2032,
+            reserveAmount: 0,
+          },
+        },
+      ],
+      debts: [],
+      recurringIncomes: [],
+    },
+    annualNetReturnRate: 0,
+    includeLateLifeGap: true,
+    currentYear: 2026,
+  });
+
+  const saleRow = analysis.rows.find((row) => row.year === 2030);
+  const purchaseRow = analysis.rows.find((row) => row.year === 2032);
+  const returnRow = analysis.rows.find((row) => row.year === 2033);
+  assert.equal(saleRow?.assetTransactionDetails[0]?.transactionKind, 'sale');
+  assert.equal(
+    purchaseRow?.assetTransactionDetails[0]?.purchasedAssetName,
+    'B 아파트',
+  );
+  assert.equal(
+    purchaseRow?.assetTransactionDetails[0]?.investableSurplus,
+    1_101_000_000,
+  );
+  assert.equal(purchaseRow?.replacementHousingValue, 1_500_000_000);
+  assert.equal(returnRow?.assetReturnIncome, 2_752_500);
+  assert.equal(
+    returnRow?.householdCashAvailableAfterAsset,
+    2_752_500,
+  );
+  assert.equal(analysis.finance.housingMoveInvestableSurplus, 1_101_000_000);
+  assert.equal(analysis.finance.housingPurchaseFundingShortfall, 0);
+});
+
 void test('첫 사망 후 생활비 비율과 유족연금 전환연도는 일치', () => {
   const result = simulate(
     person({ birth: '19800101', deathAge: 85 }),

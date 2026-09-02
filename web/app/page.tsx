@@ -82,6 +82,7 @@ import {
 import {
   buildIncomeTimelineEvents,
   incomeTimelineSnapshot,
+  type IncomeTimelineEventGroup,
 } from '@/lib/income-timeline';
 import {
   addBasicPensionToResult,
@@ -226,7 +227,16 @@ type CashflowChartPoint = {
   debtService: number;
   assetWithdrawal: number;
   assetWithdrawalDetails: { assetId: string; name: string; amount: number }[];
+  assetReturnIncome: number;
+  assetReturnIncomeDetails: {
+    assetId: string;
+    name: string;
+    amount: number;
+  }[];
+  assetReinvestedReturn: number;
+  assetTransactionDetails: HouseholdCashflowRow['assetTransactionDetails'];
   remainingRetirementAssets: number;
+  replacementHousingValue: number;
   actual: number;
   essential: number;
   gap: number;
@@ -273,7 +283,18 @@ function CashflowChartTooltip({
           <b className="text-rose-700">-{money(point.debtService)}</b>
         </div>
         <div className="flex justify-between gap-4">
-          <span className="font-bold text-slate-700">③ 자산 인출</span>
+          <span className="font-bold text-slate-700">③ 현금으로 받는 운용수익</span>
+          <b className="text-emerald-700">+{money(point.assetReturnIncome)}</b>
+        </div>
+        {point.assetReturnIncomeDetails.length > 0 && (
+          <p className="pl-3 text-[11px] leading-5 text-emerald-700">
+            {point.assetReturnIncomeDetails
+              .map((detail) => `${detail.name} ${money(detail.amount)}`)
+              .join(' + ')}
+          </p>
+        )}
+        <div className="flex justify-between gap-4">
+          <span className="font-bold text-slate-700">④ 자산 원금 인출</span>
           <b className="text-violet-700">+{money(point.assetWithdrawal)}</b>
         </div>
         {point.assetWithdrawalDetails.length > 0 && (
@@ -284,14 +305,40 @@ function CashflowChartTooltip({
           </p>
         )}
         <div className="flex justify-between gap-4 rounded-md bg-blue-50 px-2 py-1.5">
-          <span className="font-black text-blue-950">④ 생활비로 쓸 수 있는 현금</span>
+          <span className="font-black text-blue-950">⑤ 생활비로 쓸 수 있는 현금</span>
           <b className="text-blue-700">{money(point.actual)}</b>
         </div>
         <p className="pl-3 text-[11px] text-slate-500">
-          인출 후 남은 활용 예정 자산 {money(point.remainingRetirementAssets)}
+          남은 운용자산 {money(point.remainingRetirementAssets)} · 새 거주주택{' '}
+          {money(point.replacementHousingValue)} · 그해 재투자수익{' '}
+          {money(point.assetReinvestedReturn)}
         </p>
+        {point.assetTransactionDetails.map((detail) => (
+          <div
+            key={`${detail.assetId}-${detail.transactionKind}`}
+            className="rounded-md border border-violet-200 bg-violet-50 px-2 py-1.5 leading-5 text-violet-950"
+          >
+            <b>
+              {detail.transactionKind === 'sale'
+                ? `${detail.soldAssetName} 매각`
+                : detail.transactionKind === 'sale_and_purchase'
+                  ? `${detail.soldAssetName} 매각 → ${detail.purchasedAssetName ?? '새 주택'} 구입`
+                  : `${detail.purchasedAssetName ?? '새 주택'} 구입`}
+            </b>
+            : 매각·대기자금 {money(detail.saleProceeds)}
+            {detail.purchaseCost != null && (
+              <> - 구입비용 {money(detail.purchaseCost)}</>
+            )}
+            {' = '}잔여 운용자금 {money(detail.investableSurplus)}
+            {detail.transactionKind === 'sale' &&
+              detail.investableSurplus === 0 && <> · 새 주택 구입 전 대기</>}
+            {detail.fundingShortfall > 0 && (
+              <> · 별도 조달 필요 {money(detail.fundingShortfall)}</>
+            )}
+          </div>
+        ))}
         <div className="flex justify-between gap-4">
-          <span className="font-bold text-slate-700">⑤ {livingCostLegend}</span>
+          <span className="font-bold text-slate-700">⑥ {livingCostLegend}</span>
           <b className="text-orange-700">-{money(point.essential)}</b>
         </div>
         <div
@@ -299,7 +346,7 @@ function CashflowChartTooltip({
             balance < 0 ? 'text-rose-800' : 'text-emerald-800'
           }`}
         >
-          <span className="font-black">⑥ 생활비 후 최종 차이</span>
+          <span className="font-black">⑦ 생활비 후 최종 차이</span>
           <b>
             {balance < 0
               ? `-${money(Math.abs(balance))}`
@@ -2744,13 +2791,47 @@ function IncomeEventTimeline({
     startYear + 1,
     cashflowRows.at(-1)?.year ?? startYear + 1,
   );
-  const eventGroups = useMemo(
-    () =>
-      buildIncomeTimelineEvents(result, startYear).filter(
-        (group) => group.year >= startYear && group.year <= endYear,
-      ),
-    [endYear, result, startYear],
-  );
+  const eventGroups = useMemo(() => {
+    const groups = buildIncomeTimelineEvents(result, startYear).filter(
+      (group) => group.year >= startYear && group.year <= endYear,
+    );
+    const merged = new Map<number, IncomeTimelineEventGroup>(
+      groups.map((group) => [group.year, group]),
+    );
+    for (const row of cashflowRows) {
+      if (!row.assetTransactionDetails.length) continue;
+      const transactionEvents = row.assetTransactionDetails.map(
+        (detail, index) => {
+          const purchaseText = detail.purchasedAssetName
+            ? `${detail.purchasedAssetName} 구입비용 ${money(detail.purchaseCost ?? 0)}, 구입 후 운용 가능 잔여금 ${money(detail.investableSurplus)}`
+            : `순매각대금 ${money(detail.saleProceeds)}`;
+          return {
+            id: `asset-transaction-${row.year}-${detail.assetId}-${index}`,
+            year: row.year,
+            kind: detail.purchasedAssetName
+              ? ('housingPurchase' as const)
+              : ('housingSale' as const),
+            title: detail.purchasedAssetName
+              ? detail.transactionKind === 'sale_and_purchase'
+                ? `${detail.soldAssetName} 매각 → ${detail.purchasedAssetName} 구입`
+                : `${detail.purchasedAssetName} 구입`
+              : `${detail.soldAssetName} 매각`,
+            description: `${purchaseText}${detail.fundingShortfall > 0 ? `, 별도 조달 필요액 ${money(detail.fundingShortfall)}` : ''}`,
+          };
+        },
+      );
+      const existing = merged.get(row.year);
+      merged.set(row.year, {
+        id: existing?.id ?? `asset-events-${row.year}`,
+        year: row.year,
+        title: existing
+          ? `${existing.title} · 주거이전`
+          : transactionEvents.map((event) => event.title).join(' · '),
+        events: [...(existing?.events ?? []), ...transactionEvents],
+      });
+    }
+    return [...merged.values()].sort((a, b) => a.year - b.year);
+  }, [cashflowRows, endYear, result, startYear]);
   const [selectedYear, setSelectedYear] = useState(startYear);
   const [selectedEventId, setSelectedEventId] = useState(
     eventGroups[0]?.id ?? '',
@@ -2827,9 +2908,9 @@ function IncomeEventTimeline({
             </h4>
             <p className="mt-1 text-xs text-slate-500">
               파란선은 총소득에서 그해 대출 원리금을 빼고, 등록한 계획에 따른 자산
-              인출액을 더해 실제 생활비로 쓸 수 있는 월 현금입니다. 보라 점선은
-              그해 월 자산인출액, 주황 점선은 생활비 기준, 붉은 영역은 자산까지
-              사용하고도 남는 부족분입니다.
+              운용수익과 계획 인출액을 더해 실제 생활비로 쓸 수 있는 월 현금입니다.
+              초록 점선은 현금으로 받는 운용수익, 보라 점선은 자산 원금 인출액,
+              주황 점선은 생활비 기준입니다.
             </p>
           </div>
           <Badge variant="outline">단위: 월 원</Badge>
@@ -2874,9 +2955,11 @@ function IncomeEventTimeline({
               <Legend
                 formatter={(value) =>
                   value === 'actual'
-                    ? '생활비 사용 가능 현금(순소득 + 계획 자산인출)'
+                    ? '생활비 사용 가능 현금(순소득 + 운용수익 + 자산인출)'
+                    : value === 'assetReturnIncome'
+                      ? '현금으로 받는 자산 운용수익'
                     : value === 'assetWithdrawal'
-                      ? '계획 자산인출액'
+                      ? '계획 자산 원금 인출액'
                     : value === 'essential'
                       ? livingCostLegend
                       : '생활비 기준 부족액'
@@ -2889,6 +2972,14 @@ function IncomeEventTimeline({
                 stroke="#ef4444"
                 fillOpacity={0.45}
                 strokeWidth={1.5}
+              />
+              <Line
+                type="stepAfter"
+                dataKey="assetReturnIncome"
+                stroke="#059669"
+                strokeWidth={2}
+                strokeDasharray="7 4"
+                dot={false}
               />
               <Line
                 type="stepAfter"
@@ -3001,7 +3092,7 @@ function IncomeEventTimeline({
           )}
           note={
             selectedCashflow
-              ? `근로 ${money(selectedCashflow.employmentIncome)} + 연금 ${money(selectedCashflow.nationalPension + selectedCashflow.basicPension + selectedCashflow.privatePension)} + 임대·기타 ${money(selectedCashflow.rentalIncomeNet + selectedCashflow.otherIncome)} - 부채상환 ${money(selectedCashflow.debtService)} + 자산인출 ${money(selectedCashflow.assetWithdrawal)} · 인출 후 남은 활용자산 ${money(selectedCashflow.remainingRetirementAssets)}`
+              ? `근로 ${money(selectedCashflow.employmentIncome)} + 연금 ${money(selectedCashflow.nationalPension + selectedCashflow.basicPension + selectedCashflow.privatePension)} + 임대·기타 ${money(selectedCashflow.rentalIncomeNet + selectedCashflow.otherIncome)} - 부채상환 ${money(selectedCashflow.debtService)} + 운용수익 ${money(selectedCashflow.assetReturnIncome)} + 자산인출 ${money(selectedCashflow.assetWithdrawal)} · 남은 운용자산 ${money(selectedCashflow.remainingRetirementAssets)}`
               : `근로 ${money(selectedSnapshot.employmentA + selectedSnapshot.employmentB)} + 연금 ${money(selectedSnapshot.pensionNetA + selectedSnapshot.pensionNetB)}`
           }
         />
@@ -3117,7 +3208,7 @@ function IncomeEventTimeline({
                       {group.events.map((event) => event.title).join(' · ')}
                     </p>
                   </div>
-                  <Badge variant="outline">소득 전환 사건</Badge>
+                  <Badge variant="outline">가구 현금흐름 사건</Badge>
                 </div>
                 <div className="mt-3 grid gap-2">
                   {group.events.map((event) => (
@@ -3190,6 +3281,8 @@ function IncomeEventTimeline({
                           <br />
                           월 부채상환 -{money(cashflow.debtService)}
                           <br />
+                          현금 운용수익 +{money(cashflow.assetReturnIncome)}
+                          <br />
                           월 자산인출 +{money(cashflow.assetWithdrawal)}
                         </>
                       )}
@@ -3199,7 +3292,8 @@ function IncomeEventTimeline({
                 <p className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
                   {group.year}년 생활비{' '}
                   {money(cashflow?.livingCost ?? snapshot.livingCost)} 대비 그해
-                  월 부채상환을 빼고 계획한 자산인출을 더한 생활비 사용 가능 현금{' '}
+                  월 부채상환을 빼고 운용수익·계획 자산인출을 더한 생활비 사용 가능
+                  현금{' '}
                   {money(
                     cashflow?.householdCashAvailableAfterAsset ??
                       snapshot.householdIncome,
@@ -3961,7 +4055,12 @@ function LivingCostIncomeReport({
         debtService: row.debtService,
         assetWithdrawal: row.assetWithdrawal,
         assetWithdrawalDetails: row.assetWithdrawalDetails,
+        assetReturnIncome: row.assetReturnIncome,
+        assetReturnIncomeDetails: row.assetReturnIncomeDetails,
+        assetReinvestedReturn: row.assetReinvestedReturn,
+        assetTransactionDetails: row.assetTransactionDetails,
         remainingRetirementAssets: row.remainingRetirementAssets,
+        replacementHousingValue: row.replacementHousingValue,
         actual: row.householdCashAvailableAfterAsset,
         essential: row.livingCost,
         gap: row.monthlyGap,
@@ -4093,6 +4192,42 @@ function LivingCostIncomeReport({
               note="보유만 하기로 한 자산은 제외"
             />
           </div>
+          {householdFinance.assets.some(
+            (asset) => asset.housingMovePlan?.enabled,
+          ) && (
+            <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+              <Metric
+                label="주택 교체 후 생성된 운용자금"
+                value={money(cashflow.finance.housingMoveInvestableSurplus)}
+                note="예상 매각대금 - 새 주택 가격·취득비용"
+              />
+              <Metric
+                label="새 주택 구입 별도 필요자금"
+                value={money(cashflow.finance.housingPurchaseFundingShortfall)}
+                note="매각대금보다 구입비용이 큰 경우의 일시 부족액"
+                tone={
+                  cashflow.finance.housingPurchaseFundingShortfall > 0
+                    ? 'danger'
+                    : 'default'
+                }
+              />
+              <Metric
+                label="마지막 분석연도 새 주택 가치"
+                value={money(cashflow.finance.replacementHousingValueAtEnd)}
+                note="입력한 새 주택 연 가치변동률 반영"
+              />
+              <Metric
+                label="현금으로 받은 운용수익 합계"
+                value={money(cashflow.finance.plannedAssetReturnIncome)}
+                note="생활비 사용 가능 현금에 포함"
+              />
+              <Metric
+                label="운용수익 재투자 합계"
+                value={money(cashflow.finance.plannedAssetReinvestedReturns)}
+                note="인출하지 않고 운용잔액에 더한 금액"
+              />
+            </div>
+          )}
           {householdFinance.assets.length > 0 && (
             <div className="mt-4 rounded-xl border border-violet-200 bg-violet-50/60 p-4">
               <h4 className="font-black text-violet-950">
@@ -4109,6 +4244,14 @@ function LivingCostIncomeReport({
                     row.assetWithdrawalDetails.some(
                       (detail) => detail.assetId === asset.id,
                     ),
+                  );
+                  const assetTransactions = cashflow.rows.flatMap((row) =>
+                    row.assetTransactionDetails
+                      .filter((detail) => detail.assetId === asset.id)
+                      .map((detail) => ({ year: row.year, ...detail })),
+                  );
+                  const purchaseTransaction = assetTransactions.find(
+                    (detail) => detail.purchasedAssetName,
                   );
                   const totalDraw = drawRows.reduce(
                     (sum, row) =>
@@ -4141,8 +4284,35 @@ function LivingCostIncomeReport({
                       )}
                       {asset.salePlan?.enabled && (
                         <p>
-                          {asset.salePlan.year}년 매각 후 비용·세금 차감액부터 사용
+                          {asset.salePlan.year}년 매각
+                          {asset.housingMovePlan?.enabled
+                            ? ` → ${asset.housingMovePlan.purchaseYear}년 ${asset.housingMovePlan.replacementName} 구입`
+                            : ' 후 비용·세금 차감액부터 사용'}
                         </p>
+                      )}
+                      {asset.housingMovePlan?.enabled && purchaseTransaction && (
+                        <div className="my-2 rounded-md bg-violet-50 px-2 py-1.5 font-bold text-violet-950">
+                          {purchaseTransaction.year}년 계산: 매각·대기자금{' '}
+                          {money(purchaseTransaction.saleProceeds)} - 새 주택 구입비용{' '}
+                          {money(purchaseTransaction.purchaseCost ?? 0)} = 운용자금{' '}
+                          {money(purchaseTransaction.investableSurplus)}
+                          {purchaseTransaction.fundingShortfall > 0 && (
+                            <>
+                              {' '}
+                              · 별도 조달{' '}
+                              {money(purchaseTransaction.fundingShortfall)} 필요
+                            </>
+                          )}
+                          <br />
+                          {asset.housingMovePlan.surplusName} ·{' '}
+                          {asset.housingMovePlan.surplusType === 'deposit'
+                            ? '예금'
+                            : '투자'}{' '}
+                          연 {asset.housingMovePlan.surplusAnnualReturnRate}% ·{' '}
+                          {asset.housingMovePlan.surplusReturnMode === 'reinvest'
+                            ? '수익 재투자'
+                            : '수익을 생활비 현금으로 사용'}
+                        </div>
                       )}
                       {plan.mode !== 'hold' && (
                         <p className="mt-1 font-bold text-violet-800">
@@ -4294,12 +4464,13 @@ function LivingCostIncomeReport({
               )
             </h3>
             <p className="mt-2 text-sm leading-6 text-slate-700">
-              {householdRetirementYear}년 월 부채상환을 빼고 자산인출을 더한 생활비
-              사용 가능 현금{' '}
+              {householdRetirementYear}년 월 부채상환을 빼고 운용수익·자산인출을
+              더한 생활비 사용 가능 현금{' '}
               <b>
                 {money(householdRetirementRow.householdCashAvailableAfterAsset)}
               </b>{' '}
-              (자산인출 +{money(householdRetirementRow.assetWithdrawal)}) · 생활비{' '}
+              (운용수익 +{money(householdRetirementRow.assetReturnIncome)} · 자산인출 +
+              {money(householdRetirementRow.assetWithdrawal)}) · 생활비{' '}
               <b>{money(householdRetirementRow.livingCost)}</b> · 월{' '}
               {householdRetirementRow.monthlyGap > 0
                 ? `${money(householdRetirementRow.monthlyGap)} 부족`
