@@ -18,6 +18,7 @@ export default defineConfig({
     emptyOutDir: true,
     cssCodeSplit: false,
     assetsInlineLimit: 100_000_000,
+    chunkSizeWarningLimit: 1_100,
     rolldownOptions: { output: { codeSplitting: false } },
   },
 });

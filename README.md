@@ -1,6 +1,6 @@
-# 부부 연금·은퇴 종합 시뮬레이터
+# 노후자금 시뮬레이터
 
-한국 부부의 국민·기초·개인·퇴직·유족연금과 생활비, 자산·부채, 은퇴 이후 현금흐름을 한 화면에서 비교하는 웹 애플리케이션입니다.
+한국 부부의 국민·기초·개인·퇴직·유족연금과 생활비, 자산·부채, 은퇴 이후 현금흐름을 한 화면에서 비교합니다. 최종 배포물은 설치나 웹 서버가 필요 없는 `retirement-fund-simulator.html` 단일 파일입니다.
 
 모든 계산은 브라우저 안에서 수행합니다. 입력값을 서버로 보내지 않으며, 사용자가 선택한 경우에만 암호화 JSON 파일 또는 현재 탭의 `sessionStorage`에 저장합니다.
 
@@ -19,7 +19,11 @@
 - AES-256-GCM 암호화 JSON 저장·불러오기와 `Ctrl+S` 연결 저장
 - 인쇄 및 PDF용 보고서 레이아웃
 
-## 개발 환경 실행
+## 최종 배포 파일
+
+`release/retirement-fund-simulator.html`만 전달하면 됩니다. 받은 사람은 Chrome 또는 Edge에서 파일을 직접 열어 자신의 조건을 입력하고 계산할 수 있습니다.
+
+## 소스 미리보기
 
 Node.js 22.13 이상이 필요합니다.
 
@@ -29,9 +33,9 @@ npm install
 npm run dev
 ```
 
-개발 서버가 안내하는 로컬 주소를 브라우저에서 엽니다.
+이 명령은 개발 중 화면을 확인하기 위한 Vite 미리보기이며 서버용 배포물을 생성하지 않습니다.
 
-## 검사와 빌드
+## 검사와 단일 HTML 빌드
 
 ```powershell
 cd web
@@ -40,14 +44,7 @@ npm test
 npm run build
 ```
 
-설치 없이 실행할 단일 HTML 파일은 다음 명령으로 생성합니다.
-
-```powershell
-cd web
-npm run build:standalone
-```
-
-생성 결과는 `artifacts/CouplePensionSimulator-standalone-v0.1.0.html`입니다. `artifacts/`는 Git에 포함하지 않는 로컬 빌드 산출물입니다.
+`npm run build`와 `npm run build:standalone`은 모두 `release/retirement-fund-simulator.html` 한 파일을 생성합니다.
 
 ## 저장과 개인정보 보호
 

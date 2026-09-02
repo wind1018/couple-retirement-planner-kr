@@ -2,7 +2,7 @@
 
 ## 제공 형태
 
-이 프로젝트는 `web/` 폴더의 브라우저 애플리케이션만 제공합니다. 개발 서버로 실행하거나, 빌드한 단일 HTML 파일을 Chrome 또는 Edge에서 직접 열 수 있습니다.
+이 프로젝트의 최종 배포물은 `release/retirement-fund-simulator.html` 한 파일입니다. Chrome 또는 Edge에서 직접 열며 별도의 웹 서버를 실행할 필요가 없습니다.
 
 계산과 정책 검증은 브라우저 내부에서 수행합니다. 개인정보를 받는 API, 데이터베이스, 계정 또는 분석 도구를 사용하지 않습니다.
 
@@ -16,7 +16,7 @@ npm install
 npm run dev
 ```
 
-단일 HTML은 `npm run build:standalone`으로 생성합니다.
+개발 미리보기는 Vite만 사용하며 서버 배포판을 만들지 않습니다. 단일 HTML은 `npm run build` 또는 `npm run build:standalone`으로 생성합니다.
 
 ## 저장하지 않은 상태
 
